@@ -1,15 +1,15 @@
-"""ClawBody - Voice handler using MiniMax LLM and ElevenLabs TTS.
+"""ClawBody - Voice handler using MiniMax LLM and Baidu ASR/TTS.
 
 This module implements ClawBody's voice conversation system using:
 - MiniMax M2.7 for language model responses (via OpenAI-compatible API)
-- MiniMax STT for speech-to-text transcription
-- ElevenLabs for text-to-speech synthesis
+- Baidu ASR for speech-to-text transcription
+- Baidu TTS for text-to-speech synthesis
 - Energy-based VAD for voice activity detection
 
 Architecture:
     Startup: Initialize API clients, fetch OpenClaw agent context
-    Runtime: User speaks → VAD detects speech end → MiniMax STT →
-             MiniMax M2.7 LLM (with tools) → ElevenLabs TTS → Robot speaks
+    Runtime: User speaks → VAD detects speech end → Baidu ASR →
+             MiniMax M2.7 LLM (with tools) → Baidu TTS → Robot speaks
              → Conversations synced back to OpenClaw for memory continuity
 """
 
@@ -113,14 +113,14 @@ def _to_chat_tool_spec(realtime_spec: dict) -> dict:
 
 
 class VoiceHandler(AsyncStreamHandler):
-    """Voice conversation handler using MiniMax M2.7 and ElevenLabs.
+    """Voice conversation handler using MiniMax M2.7 and Baidu ASR/TTS.
 
     This handler:
     - Fetches OpenClaw's personality and context at startup
     - Performs VAD on incoming audio to detect when the user stops speaking
-    - Transcribes speech using MiniMax's STT endpoint
+    - Transcribes speech using Baidu ASR
     - Generates responses using MiniMax M2.7 (with tool calls for robot movement)
-    - Synthesizes speech using ElevenLabs (PCM output, no extra decoder needed)
+    - Synthesizes speech using Baidu TTS
     - Syncs conversations back to OpenClaw for memory continuity
     """
 
@@ -179,11 +179,14 @@ class VoiceHandler(AsyncStreamHandler):
     async def start_up(self) -> None:
         """Initialise API clients and wait until shutdown is requested."""
         minimax_key = config.MINIMAX_API_KEY
-        elevenlabs_key = config.ELEVENLABS_API_KEY
+        baidu_api_key = config.BAIDU_API_KEY
+        baidu_secret_key = config.BAIDU_SECRET_KEY
         if not minimax_key:
             raise ValueError("MINIMAX_API_KEY is not configured")
-        if not elevenlabs_key:
-            raise ValueError("ELEVENLABS_API_KEY is not configured")
+        if not baidu_api_key:
+            raise ValueError("BAIDU_API_KEY is not configured")
+        if not baidu_secret_key:
+            raise ValueError("BAIDU_SECRET_KEY is not configured")
 
         self._client = AsyncOpenAI(
             api_key=minimax_key,
@@ -195,7 +198,7 @@ class VoiceHandler(AsyncStreamHandler):
 
         # Fetch system prompt once at startup
         self._system_instructions = await self._build_system_instructions()
-        logger.info("Voice handler ready (MiniMax %s + ElevenLabs)", config.MINIMAX_MODEL)
+        logger.info("Voice handler ready (MiniMax %s + Baidu ASR/TTS)", config.MINIMAX_MODEL)
 
         while not self._shutdown_requested:
             await asyncio.sleep(0.1)
@@ -220,7 +223,9 @@ class VoiceHandler(AsyncStreamHandler):
         # Resample to VAD sample rate if the robot delivers a different rate
         if input_sr != VAD_SAMPLE_RATE:
             n = int(len(audio) * VAD_SAMPLE_RATE / input_sr)
-            audio = resample(audio.astype(np.float32), n).astype(np.int16)
+            audio_float = audio.astype(np.float32)
+            resampled: np.ndarray = resample(audio_float, n)
+            audio = resampled.astype(np.int16)
 
         energy = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
 
@@ -337,26 +342,15 @@ class VoiceHandler(AsyncStreamHandler):
             self.deps.movement_manager.set_processing(False)
 
     async def _transcribe(self, audio: NDArray[np.int16]) -> Optional[str]:
-        """Transcribe audio using Google Speech Recognition (free, no API key)."""
+        """Transcribe audio using Baidu ASR (Chinese/English speech recognition)."""
         try:
-            import speech_recognition as sr
+            from reachy_mini_openclaw.baidu_voice import BaiduVoiceClient
 
-            recognizer = sr.Recognizer()
-            # sr.AudioData expects raw PCM bytes, sample_rate, and bytes-per-sample
-            audio_data = sr.AudioData(audio.tobytes(), VAD_SAMPLE_RATE, 2)
-
-            loop = asyncio.get_event_loop()
-            text = await loop.run_in_executor(
-                None,
-                lambda: recognizer.recognize_google(audio_data, language="en-US"),
-            )
+            client = BaiduVoiceClient()
+            text = await client.asr_transcribe(audio, sample_rate=VAD_SAMPLE_RATE)
             return text
         except Exception as e:
-            import speech_recognition as sr
-            if isinstance(e, sr.UnknownValueError):
-                logger.debug("STT: no speech detected in segment")
-            else:
-                logger.error("STT failed: %s", e)
+            logger.error("Baidu ASR failed: %s", e)
             return None
 
     async def _get_llm_response(self, user_text: str) -> Optional[str]:
@@ -469,41 +463,49 @@ class VoiceHandler(AsyncStreamHandler):
         return text.strip()
 
     async def _synthesize_and_queue(self, text: str) -> None:
-        """Synthesize speech with ElevenLabs (PCM output) and queue for playback."""
+        """Synthesize speech with Baidu TTS and queue for playback."""
         try:
             text = self._clean_for_tts(text)
             if not text:
                 return
 
-            voice_id = config.ELEVENLABS_VOICE_ID
-            api_key = config.ELEVENLABS_API_KEY
+            from reachy_mini_openclaw.baidu_voice import BaiduVoiceClient
 
-            # Request raw PCM at 24 kHz to avoid any MP3 decoding
-            url = (
-                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-                "?output_format=pcm_24000"
-            )
-            headers = {
-                "xi-api-key": api_key,
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "text": text,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-            }
+            client = BaiduVoiceClient()
+            audio_bytes = await client.tts_synthesize(text)
 
-            response = await self._http.post(url, json=payload, headers=headers)
-            response.raise_for_status()
+            if audio_bytes is None:
+                logger.error("Baidu TTS returned no audio")
+                return
 
-            # Response body is raw int16 PCM at 24 kHz, mono
-            samples = np.frombuffer(response.content, dtype=np.int16)
-            logger.info("ElevenLabs TTS: %d samples (%.1fs)", len(samples), len(samples) / OUTPUT_SAMPLE_RATE)
+            # Baidu TTS returns MP3, decode to PCM
+            try:
+                from pydub import AudioSegment
+                audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+                # Convert to 24kHz mono int16 PCM
+                audio_segment = audio_segment.set_frame_rate(OUTPUT_SAMPLE_RATE).set_channels(1)
+                samples = np.array(audio_segment.get_array_of_samples(), dtype=np.int16)
+            except ImportError:
+                # Fallback: try using ffmpeg directly if pydub not available
+                logger.warning("pydub not installed, trying ffmpeg fallback for MP3 decoding")
+                import subprocess
+                proc = subprocess.run(
+                    ["ffmpeg", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le",
+                     "-ar", str(OUTPUT_SAMPLE_RATE), "-ac", "1", "pipe:1"],
+                    input=audio_bytes,
+                    capture_output=True,
+                )
+                if proc.returncode != 0:
+                    logger.error("ffmpeg MP3 decode failed: %s", proc.stderr.decode())
+                    return
+                samples = np.frombuffer(proc.stdout, dtype=np.int16)
+
+            logger.info("Baidu TTS: %d samples (%.1fs)", len(samples), len(samples) / OUTPUT_SAMPLE_RATE)
             await self.output_queue.put((OUTPUT_SAMPLE_RATE, samples.reshape(1, -1)))
             self.last_activity_time = asyncio.get_event_loop().time()
 
         except Exception as e:
-            logger.error("ElevenLabs TTS error: %s", e)
+            logger.error("Baidu TTS error: %s", e)
 
     # ------------------------------------------------------------------
     # System prompt

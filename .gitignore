@@ -60,3 +60,7 @@ Thumbs.db
 
 # Package manager
 uv.lock
+
+# Test audio files
+test_tts_output_*.mp3
+*.mp3

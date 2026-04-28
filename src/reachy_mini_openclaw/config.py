@@ -22,11 +22,19 @@ class Config:
     # MiniMax Configuration
     MINIMAX_API_KEY: str = field(default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""))
     MINIMAX_MODEL: str = field(default_factory=lambda: os.getenv("MINIMAX_MODEL", "MiniMax-M2.7"))
-    MINIMAX_BASE_URL: str = field(default_factory=lambda: os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.chat/v1/"))
+    MINIMAX_BASE_URL: str = field(default_factory=lambda: os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat/v1/"))
 
-    # ElevenLabs Configuration
-    ELEVENLABS_API_KEY: str = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
-    ELEVENLABS_VOICE_ID: str = field(default_factory=lambda: os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"))
+    # Baidu ASR/TTS Configuration (replaces ElevenLabs)
+    BAIDU_APP_ID: str = field(default_factory=lambda: os.getenv("BAIDU_APP_ID", ""))
+    BAIDU_API_KEY: str = field(default_factory=lambda: os.getenv("BAIDU_API_KEY", ""))
+    BAIDU_SECRET_KEY: str = field(default_factory=lambda: os.getenv("BAIDU_SECRET_KEY", ""))
+    # Baidu TTS voice options: 0=female, 1=male, 3=duxiaomei, 4=duxiaoyao, 5=duyaya, 111=duboxiong
+    BAIDU_TTS_PER: int = field(default_factory=lambda: int(os.getenv("BAIDU_TTS_PER", "111")))
+    BAIDU_TTS_SPD: int = field(default_factory=lambda: int(os.getenv("BAIDU_TTS_SPD", "5")))  # speed 0-15
+    BAIDU_TTS_PIT: int = field(default_factory=lambda: int(os.getenv("BAIDU_TTS_PIT", "5")))  # pitch 0-15
+    BAIDU_TTS_VOL: int = field(default_factory=lambda: int(os.getenv("BAIDU_TTS_VOL", "5")))  # volume 0-15
+    # Baidu ASR language: zh-CN, en-US, etc.
+    BAIDU_ASR_LANGUAGE: str = field(default_factory=lambda: os.getenv("BAIDU_ASR_LANGUAGE", "zh-CN"))
     
     # OpenClaw Gateway Configuration
     OPENCLAW_GATEWAY_URL: str = field(default_factory=lambda: os.getenv("OPENCLAW_GATEWAY_URL", "ws://localhost:18789"))
@@ -64,8 +72,10 @@ class Config:
         errors = []
         if not self.MINIMAX_API_KEY:
             errors.append("MINIMAX_API_KEY is required")
-        if not self.ELEVENLABS_API_KEY:
-            errors.append("ELEVENLABS_API_KEY is required")
+        if not self.BAIDU_API_KEY:
+            errors.append("BAIDU_API_KEY is required")
+        if not self.BAIDU_SECRET_KEY:
+            errors.append("BAIDU_SECRET_KEY is required")
         return errors
 
 

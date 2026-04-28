@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clawbody"
 version = "0.1.0"
-description = "ClawBody - Give your OpenClaw AI agent a physical robot body with Reachy Mini. Voice conversation powered by MiniMax M2.7 LLM and ElevenLabs TTS with expressive movements."
+description = "ClawBody - Give your OpenClaw AI agent a physical robot body with Reachy Mini. Voice conversation powered by MiniMax M2.7 LLM and Baidu ASR/TTS with expressive movements."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
@@ -39,13 +39,16 @@ dependencies = [
     # MiniMax LLM via OpenAI-compatible client
     "openai>=1.50.0",
 
-    # ElevenLabs TTS HTTP calls
+    # HTTP client for Baidu ASR/TTS
     "httpx>=0.25.0",
 
     # Audio streaming
     "fastrtc>=0.0.17",
     "numpy",
     "scipy",
+
+    # Audio decoding (Baidu TTS returns MP3)
+    "pydub>=0.25.0",
 
     # OpenClaw gateway client (WebSocket protocol)
     "websockets>=12.0",

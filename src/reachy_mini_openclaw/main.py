@@ -139,6 +139,11 @@ Examples:
         type=str,
         help="Custom personality profile to use"
     )
+    parser.add_argument(
+        "--usb",
+        action="store_true",
+        help="Use USB connection for Reachy Mini Lite (default constructor)"
+    )
     
     return parser.parse_args()
 
@@ -163,6 +168,7 @@ class ClawBodyCore:
         enable_openclaw: bool = True,
         robot: Optional["ReachyMini"] = None,
         external_stop_event: Optional[threading.Event] = None,
+        use_usb: bool = False,
     ):
         """Initialize the application.
 
@@ -175,6 +181,7 @@ class ClawBodyCore:
             enable_openclaw: Whether to enable OpenClaw integration
             robot: Optional pre-initialized robot (for app framework)
             external_stop_event: Optional external stop event
+            use_usb: If True, use default ReachyMini() for USB-connected Lite
         """
         from reachy_mini import ReachyMini
         from reachy_mini_openclaw.config import config
@@ -199,7 +206,20 @@ class ClawBodyCore:
         if robot is not None:
             self.robot = robot
             logger.info("Using provided Reachy Mini instance")
+        elif use_usb:
+            # USB-connected Reachy Mini Lite (default constructor)
+            logger.info("Connecting to Reachy Mini via USB...")
+            try:
+                self.robot = ReachyMini()
+            except Exception as e:
+                logger.error("USB connection failed: %s", e)
+                raise RuntimeError(
+                    f"Robot USB connection failed: {e}. "
+                    "Make sure the robot is powered on and USB is connected."
+                ) from e
+            logger.info("Connected to robot: %s", self.robot.client.get_status())
         else:
+            # Network/simulator connection
             host = robot_host or config.ROBOT_HOST
             port = robot_port or config.ROBOT_PORT
 
@@ -697,6 +717,7 @@ def main() -> None:
             robot_port=args.robot_port,
             enable_camera=not args.no_camera,
             enable_openclaw=not args.no_openclaw,
+            use_usb=args.usb,
         )
         
         try:
