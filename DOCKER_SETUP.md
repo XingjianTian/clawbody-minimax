@@ -45,6 +45,13 @@ BAIDU_ASR_LANGUAGE=zh-CN
 docker compose up -d --build
 ```
 
+Dockerfile 默认使用阿里云 Debian 镜像，以提高国内网络下首次构建的稳定性。海外网络需要改回官方源时，可执行：
+
+```powershell
+docker compose build --build-arg DEBIAN_MIRROR=https://deb.debian.org
+docker compose up -d
+```
+
 构建完成后打开 `http://localhost:7860`，点击“开始对话”，面对机器人麦克风说话。机器人应显示识别文字、生成回答、播放语音并配合动作。
 
 以后可在 Docker Desktop 的 Containers 页面启动或停止 `clawbody-reachy`，无需重新构建。也可以使用：
@@ -67,5 +74,17 @@ docker compose logs -f clawbody
 - 网页打不开：确认 Docker Desktop 正在运行，且 7860 端口未被其他程序占用。
 - 能动作但无声音：在心宠控制软件中确认扬声器设备、音量和系统输出设备正确。
 - ASR/TTS 或 LLM 报错：检查 `.env` 中对应密钥、服务权限、余额及模型名称。
+
+如果构建停在 `apt-get` 并显示 `exit code: 100`，先导出未折叠的完整日志：
+
+```powershell
+docker compose build --no-cache --progress=plain 2>&1 | Tee-Object docker-build.log
+```
+
+查看 `docker-build.log` 中 `exit code: 100` 前面的第一条 `E:` 或 `Err:`：
+
+- `Temporary failure resolving`、`Connection timed out` 或 `EOF`：属于网络、DNS 或镜像源问题。退出 VPN/代理后重启 Docker Desktop，并重试构建。
+- 错误地址包含失效的第三方 Docker 镜像站：在 Docker Desktop 的 **Settings > Docker Engine** 中移除对应 `registry-mirrors`，点击 **Apply & restart**。
+- `Unable to locate package`：通常是软件源索引未完整下载；先解决前面的网络错误，再重新构建。
 
 修改身份和说话方式时，编辑 `robot_identity/AGENTS.md`；容器以只读方式挂载该目录，下一次回答会读取最新内容。

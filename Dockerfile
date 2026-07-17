@@ -2,13 +2,20 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ARG DEBIAN_MIRROR=https://mirrors.aliyun.com
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     GST_PLUGIN_PATH=/opt/gst-plugins-rs/lib/x86_64-linux-gnu
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN sed -i \
+        -e "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" \
+        -e "s|https://deb.debian.org|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+        install -y --no-install-recommends \
         build-essential \
         curl \
         ffmpeg \
@@ -41,8 +48,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --pr
     && cargo cinstall -p gst-plugin-webrtc --prefix=/opt/gst-plugins-rs --release \
     && rm -rf /tmp/gst-plugins-rs /root/.cargo /root/.rustup
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gstreamer1.0-plugins-bad \
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+        install -y --no-install-recommends gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md LICENSE ./
