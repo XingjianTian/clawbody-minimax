@@ -112,7 +112,7 @@ def launch_gradio(
         # 🤖 Reachy Mini OpenClaw
 
         Give your OpenClaw AI agent a physical presence with Reachy Mini.
-        Voice powered by MiniMax M2.7 + ElevenLabs TTS.
+        Voice powered by an OpenAI-compatible LLM + Baidu ASR/TTS.
         """)
         
         with gr.Tab("Conversation"):
@@ -170,8 +170,10 @@ def launch_gradio(
 
             - **Robot Host**: {robot_host or config.ROBOT_HOST}:{robot_port or config.ROBOT_PORT}
             - **OpenClaw Gateway**: {gateway_url}
-            - **MiniMax Model**: {config.MINIMAX_MODEL}
-            - **ElevenLabs Voice ID**: {config.ELEVENLABS_VOICE_ID}
+            - **LLM Model**: {config.MINIMAX_MODEL}
+            - **LLM Base URL**: {config.MINIMAX_BASE_URL}
+            - **Baidu ASR Language**: {config.BAIDU_ASR_LANGUAGE}
+            - **Baidu TTS Voice**: {config.BAIDU_TTS_PER}
             - **Camera Enabled**: {enable_camera}
             - **OpenClaw Enabled**: {enable_openclaw}
 
@@ -184,8 +186,8 @@ def launch_gradio(
 
             This application combines:
 
-            - **MiniMax M2.7** for LLM responses and speech-to-text
-            - **ElevenLabs TTS** for natural voice synthesis
+            - **OpenAI-compatible LLM** for assistant responses and tool calls
+            - **Baidu ASR/TTS** for speech recognition and voice synthesis
             - **OpenClaw Gateway** for extended AI capabilities (web, calendar, smart home, etc.)
             - **Reachy Mini Robot** for physical embodiment with expressive movements
 
@@ -201,8 +203,7 @@ def launch_gradio(
 
             - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini)
             - [OpenClaw](https://github.com/openclaw/openclaw)
-            - [MiniMax API](https://www.minimaxi.chat/)
-            - [ElevenLabs](https://elevenlabs.io/)
+            - [Baidu Smart Cloud](https://cloud.baidu.com/)
             """)
     
     demo.launch(share=share, server_name="0.0.0.0", server_port=7860)

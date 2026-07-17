@@ -41,7 +41,7 @@ Your Voice → Baidu ASR → MiniMax LLM (+ Tools) → Baidu TTS → Robot Speak
 
 ```bash
 # Clone the repository
-git clone https://github.com/wuzhenhuo/clawbody-minimax.git
+git clone https://github.com/XingjianTian/clawbody-minimax.git
 cd clawbody-minimax
 
 # Create virtual environment
@@ -65,10 +65,13 @@ cp .env.example .env
 
 2. Edit `.env` with your API keys:
 ```bash
-# MiniMax LLM
-MINIMAX_API_KEY=your-minimax-api-key
-MINIMAX_MODEL=MiniMax-M2.7
-MINIMAX_BASE_URL=https://api.minimax.chat/v1/
+# Alibaba Cloud DashScope LLM (OpenAI-compatible API)
+# The MINIMAX_* names are retained for compatibility with the application.
+MINIMAX_API_KEY=your-dashscope-api-key
+MINIMAX_MODEL=qwen-plus
+MINIMAX_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MINIMAX_MAX_TOKENS=80
+HTTP_TRUST_ENV=false
 
 # Baidu ASR/TTS
 BAIDU_APP_ID=your-baidu-app-id
@@ -77,7 +80,7 @@ BAIDU_SECRET_KEY=your-baidu-secret-key
 BAIDU_TTS_PER=111        # Voice: 0=female, 1=male, 111=duboxiong
 BAIDU_TTS_SPD=5          # Speed: 0-15
 BAIDU_TTS_PIT=5          # Pitch: 0-15
-BAIDU_TTS_VOL=5          # Volume: 0-15
+BAIDU_TTS_VOL=12         # Volume: 0-15
 BAIDU_ASR_LANGUAGE=zh-CN # Language: zh-CN or en-US
 
 # OpenClaw (optional)
@@ -114,6 +117,51 @@ reachy-mini-daemon --sim
 # Terminal 2: Run ClawBody
 clawbody --gradio
 ```
+
+### With Docker Desktop
+
+For a new Windows computer, clone the repository, create a local configuration,
+then start the robot and container:
+
+```powershell
+git clone https://github.com/XingjianTian/clawbody-minimax.git
+cd clawbody-minimax
+Copy-Item .env.example .env
+notepad .env
+docker compose up -d --build
+```
+
+Enter that person's own DashScope and Baidu credentials in `.env`; never commit
+this file or share it through Git. Start Reachy Mini Control first, connect the
+robot, and make sure it provides the Reachy daemon at `localhost:8000` before
+running the Docker command.
+
+Open this repository in Docker Desktop as a Compose project and click **Run**.
+The container starts the Gradio conversation service and connects to the host
+daemon through `host.docker.internal:8000`. Open <http://localhost:7860> in a
+browser to talk with Reachy Mini. The first build downloads and compiles robot
+dependencies, so it can take several minutes.
+
+The local `.env` file is passed into the container at startup, so keep the
+Baidu and LLM credentials there and do not add them to the Dockerfile. Useful
+PowerShell commands are:
+
+```powershell
+docker compose ps
+docker compose logs -f clawbody
+docker compose down
+```
+
+### Customize Robot Identity and Tone
+
+Edit `robot_identity/AGENTS.md` to change the robot's name, personality,
+speaking style, rules, and manually maintained memories. The default tone is
+friendly, natural, clear, and concise, similar to GPT's conversational style.
+
+When using Docker Compose, this directory is mounted read-only inside the
+container. Saved edits are loaded before the next LLM answer, so changing the
+identity does not require rebuilding or restarting the container. Do not use
+the repository-root `AGENTS.md`; that file contains contributor instructions.
 
 ### CLI Options
 

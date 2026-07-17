@@ -35,6 +35,30 @@ load_dotenv(_project_root / ".env", override=True)
 logger = logging.getLogger(__name__)
 
 
+def _patch_remote_media_signalling_host(host: str) -> None:
+    """Make Reachy's WebRTC client use the reachable daemon host.
+
+    The daemon status may leave ``wlan_ip`` empty when it runs over USB. In a
+    Docker network client that makes the SDK fall back to the container's own
+    localhost, even though the SDK websocket is reachable through the host.
+    """
+    from reachy_mini.reachy_mini import WSClient
+
+    if getattr(WSClient, "_clawbody_signalling_patch", False):
+        return
+
+    original_get_status = WSClient.get_status
+
+    def get_status_with_host(self: Any, *args: Any, **kwargs: Any) -> Any:
+        status = original_get_status(self, *args, **kwargs)
+        if getattr(status, "wlan_ip", None):
+            return status
+        return status.model_copy(update={"wlan_ip": host})
+
+    WSClient.get_status = get_status_with_host
+    WSClient._clawbody_signalling_patch = True
+
+
 def setup_logging(debug: bool = False) -> None:
     """Configure logging for the application.
     
@@ -48,12 +72,17 @@ def setup_logging(debug: bool = False) -> None:
         datefmt="%H:%M:%S",
     )
     
-    # Reduce noise from libraries
-    if not debug:
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("websockets").setLevel(logging.WARNING)
-        logging.getLogger("openai").setLevel(logging.WARNING)
-        logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Keep debug useful without flooding the terminal with websocket/audio internals.
+    noisy_loggers = (
+        "httpcore",
+        "httpx",
+        "websockets",
+        "openai",
+        "PIL",
+        "multipart",
+    )
+    for name in noisy_loggers:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,6 +223,7 @@ class ClawBodyCore:
         self.gateway_url = gateway_url
         self._external_stop_event = external_stop_event
         self._owns_robot = robot is None
+        self._use_robot_audio_input = False
 
         # Validate configuration
         errors = config.validate()
@@ -205,6 +235,7 @@ class ClawBodyCore:
         # Connect to robot
         if robot is not None:
             self.robot = robot
+            self._use_robot_audio_input = getattr(robot, "connection_mode", None) == "network"
             logger.info("Using provided Reachy Mini instance")
         elif use_usb:
             # USB-connected Reachy Mini Lite (default constructor)
@@ -240,6 +271,8 @@ class ClawBodyCore:
             }
             if robot_name:
                 robot_kwargs["robot_name"] = robot_name
+            if connection_mode == "network":
+                _patch_remote_media_signalling_host(host)
 
             try:
                 self.robot = ReachyMini(**robot_kwargs)
@@ -255,8 +288,9 @@ class ClawBodyCore:
                     f"Robot connection failed: {e}. "
                     "For simulation, run: reachy-mini-daemon --sim"
                 ) from e
-                
+
             logger.info("Connected to robot: %s", self.robot.client.get_status())
+            self._use_robot_audio_input = connection_mode == "network"
         
         # Initialize movement system
         logger.info("Initializing movement system...")
@@ -410,8 +444,52 @@ class ClawBodyCore:
             return True
         return False
         
+    async def _record_robot_media_loop(self) -> None:
+        """Read Reachy's WebRTC microphone and emit 100 ms mono chunks."""
+        import numpy as np
+
+        sample_rate = self.robot.media.get_input_audio_samplerate()
+        if not sample_rate or sample_rate <= 0:
+            raise RuntimeError("Reachy WebRTC microphone has no valid sample rate")
+
+        chunk_frames = max(1, int(sample_rate * 0.1))
+        pending = np.empty((0, 1), dtype=np.float32)
+        logger.info("Recording from Reachy WebRTC microphone at %d Hz", sample_rate)
+
+        while not self._should_stop():
+            sample = self.robot.media.get_audio_sample()
+            if sample is None:
+                await asyncio.sleep(0.01)
+                continue
+
+            audio = np.asarray(sample, dtype=np.float32)
+            if audio.ndim == 1:
+                audio = audio.reshape(-1, 1)
+            elif audio.ndim == 2:
+                if audio.shape[0] <= 2 < audio.shape[1]:
+                    audio = audio.T
+                audio = audio.mean(axis=1, keepdims=True)
+            else:
+                logger.warning("Ignoring unexpected Reachy audio shape: %s", audio.shape)
+                continue
+
+            if audio.size == 0:
+                continue
+            pending = np.concatenate((pending, audio), axis=0)
+
+            while len(pending) >= chunk_frames and not self._should_stop():
+                chunk = pending[:chunk_frames]
+                pending = pending[chunk_frames:]
+                await self.handler.receive((sample_rate, chunk))
+
+            await asyncio.sleep(0)
+
     async def record_loop(self) -> None:
-        """Read audio from microphone via sounddevice and send to handler."""
+        """Read microphone audio and send it to the voice handler."""
+        if self._use_robot_audio_input:
+            await self._record_robot_media_loop()
+            return
+
         import sounddevice as sd
         import queue as _queue
         import numpy as np
@@ -497,6 +575,42 @@ class ClawBodyCore:
                     pass
                 await asyncio.sleep(0)
             
+    async def _push_audio_realtime(self, audio_data: Any, sample_rate: int) -> None:
+        """Stream audio in small chunks so WebRTC can timestamp and encode it."""
+        chunk_frames = max(1, int(sample_rate * 0.02))
+        for start in range(0, len(audio_data), chunk_frames):
+            if self._should_stop():
+                break
+            self.robot.media.push_audio_sample(audio_data[start : start + chunk_frames])
+            await asyncio.sleep(0.01)
+
+    async def _play_audio_via_daemon(self, audio_data: Any, sample_rate: int) -> None:
+        """Upload a temporary WAV and let Reachy Control play it locally."""
+        import tempfile
+        import wave
+
+        import numpy as np
+
+        pcm = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
+        path = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                path = temp_file.name
+            with wave.open(path, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(pcm.tobytes())
+
+            await asyncio.to_thread(self.robot.media.play_sound, path)
+            await asyncio.sleep(len(pcm) / sample_rate)
+        finally:
+            if path:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+
     async def play_loop(self) -> None:
         """Play audio from handler through robot speakers."""
         output_sr = self.robot.media.get_output_audio_samplerate()
@@ -511,8 +625,10 @@ class ClawBodyCore:
                     # Convert to float32 and normalize (OpenAI sends int16)
                     audio_data = audio_data.flatten().astype("float32") / 32768.0
                     
-                    # Reduce volume to prevent distortion (0.5 = 50% volume)
-                    audio_data = audio_data * 0.5
+                    # Local realtime playback needs extra headroom. Network
+                    # mode uses Reachy Control's volume and clipping protection.
+                    if not self._use_robot_audio_input:
+                        audio_data = audio_data * 0.5
                     
                     # Resample if needed
                     if input_sr != output_sr:
@@ -522,7 +638,10 @@ class ClawBodyCore:
                         
                     logger.info("Playing TTS audio: %d samples at %d Hz (%.1fs)",
                                 len(audio_data), output_sr, len(audio_data) / output_sr)
-                    self.robot.media.push_audio_sample(audio_data)
+                    if self._use_robot_audio_input:
+                        await self._play_audio_via_daemon(audio_data, output_sr)
+                    else:
+                        await self._push_audio_realtime(audio_data, output_sr)
                 # else: it's an AdditionalOutputs (transcript) - handle in UI mode
                 
             await asyncio.sleep(0.01)
