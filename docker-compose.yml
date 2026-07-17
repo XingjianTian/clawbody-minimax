@@ -1,0 +1,24 @@
+services:
+  clawbody:
+    build: .
+    container_name: clawbody-reachy
+    env_file:
+      - .env
+    environment:
+      ROBOT_HOST: host.docker.internal
+      ROBOT_PORT: "8000"
+      ENABLE_CAMERA: "false"
+      ENABLE_FACE_TRACKING: "false"
+      ENABLE_LLM_TOOLS: "false"
+      ENABLE_AUTO_MOTION: "true"
+      ROBOT_IDENTITY_FILE: /app/robot_identity/AGENTS.md
+    volumes:
+      - type: bind
+        source: ./robot_identity
+        target: /app/robot_identity
+        read_only: true
+    ports:
+      - "7860:7860"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

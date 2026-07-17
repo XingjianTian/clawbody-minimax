@@ -50,7 +50,12 @@ async def _analyze_image_with_openai(frame: np.ndarray, prompt: str) -> Optional
         _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         b64_image = base64.b64encode(buffer).decode('utf-8')
 
-        client = AsyncOpenAI(api_key=api_key, base_url=config.MINIMAX_BASE_URL)
+        import httpx
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=config.MINIMAX_BASE_URL,
+            http_client=httpx.AsyncClient(timeout=30.0, trust_env=config.HTTP_TRUST_ENV),
+        )
         response = await client.chat.completions.create(
             model=config.MINIMAX_MODEL,
             max_tokens=300,

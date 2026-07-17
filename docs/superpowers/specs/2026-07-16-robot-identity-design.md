@@ -6,7 +6,7 @@ Give Reachy Mini a manually maintained identity and memory that influences every
 
 ## Identity File
 
-The robot identity lives at `robot_identity/AGENTS.md`. It contains the robot's name, background, personality, relationship with the user, speaking style, behavioral rules, and manually curated memories. The application never writes to this file.
+The robot identity lives at `robot_identity/AGENTS.md`. It contains the robot's name, background, personality, relationship with the user, speaking style, behavioral rules, and manually curated memories. The starter speaking style is GPT-like: friendly, natural, clear, calm, direct, and concise for voice conversation. The application never writes to this file.
 
 ## Prompt Assembly
 

@@ -47,9 +47,6 @@ dependencies = [
     "numpy",
     "scipy",
 
-    # Audio decoding (Baidu TTS returns MP3)
-    "pydub>=0.25.0",
-
     # OpenClaw gateway client (WebSocket protocol)
     "websockets>=12.0",
 

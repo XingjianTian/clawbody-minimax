@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Test MiniMax API key validity.
+"""Test configured OpenAI-compatible LLM API key validity.
 
 Usage:
     conda activate reachy_mini_env
     cd /path/to/clawbody-minimax
     python test_minimax_key.py
 
-Tests multiple configurations to diagnose 401 errors.
+Reads MINIMAX_* variables from .env for historical compatibility.
 """
 
 import os
@@ -27,18 +27,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def test_key(api_key: str, base_url: str, label: str) -> bool:
-    """Test a specific key + base_url combination."""
+async def test_key(api_key: str, base_url: str, model: str, label: str) -> bool:
+    """Test a specific key + base_url + model combination."""
     logger.info("Testing %s...", label)
-    logger.info("  Key: %s...", api_key[:30] if len(api_key) > 30 else api_key)
+    logger.info("  Key: configured (length: %d)", len(api_key))
     logger.info("  URL: %s", base_url)
+    logger.info("  Model: %s", model)
 
     try:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
         response = await client.chat.completions.create(
-            model="MiniMax-M2.7",
+            model=model,
             messages=[{"role": "user", "content": "Hello"}],
             max_tokens=10,
         )
@@ -52,52 +53,42 @@ async def test_key(api_key: str, base_url: str, label: str) -> bool:
 
 
 async def main():
-    """Run MiniMax key diagnostics."""
+    """Run configured LLM key diagnostics."""
     logger.info("=" * 60)
-    logger.info("MiniMax API Key Diagnostic Tool")
+    logger.info("OpenAI-Compatible LLM API Key Diagnostic Tool")
     logger.info("=" * 60)
     logger.info("")
 
-    # Get key from env
     api_key = os.getenv("MINIMAX_API_KEY", "")
+    base_url = os.getenv("MINIMAX_BASE_URL", "")
+    model = os.getenv("MINIMAX_MODEL", "")
     if not api_key:
         logger.error("MINIMAX_API_KEY not found in .env")
         return
+    if not base_url:
+        logger.error("MINIMAX_BASE_URL not found in .env")
+        return
+    if not model:
+        logger.error("MINIMAX_MODEL not found in .env")
+        return
 
-    logger.info("Key from .env: %s... (length: %d)", api_key[:30], len(api_key))
+    logger.info("Key from .env: configured (length: %d)", len(api_key))
     logger.info("")
 
-    # Test different base URLs
-    test_configs = [
-        (api_key, "https://api.minimaxi.chat/v1/", "Default URL (.env)"),
-        (api_key, "https://api.minimaxi.chat/v1", "Without trailing slash"),
-        (api_key, "https://api.minimax.chat/v1/", "Alternative spelling (minimax)"),
-        (api_key, "https://api.minimax.chat/v1", "Alternative spelling, no slash"),
-    ]
+    success = await test_key(api_key, base_url, model, ".env configuration")
 
-    results = []
-    for key, url, label in test_configs:
-        results.append((label, await test_key(key, url, label)))
-        logger.info("")
-
-    # Summary
     logger.info("=" * 60)
-    logger.info("Results Summary")
+    logger.info("Result Summary")
     logger.info("=" * 60)
-    for label, success in results:
-        status = "PASS" if success else "FAIL"
-        logger.info("%s: %s", status, label)
+    logger.info("%s: .env configuration", "PASS" if success else "FAIL")
 
-    any_success = any(r[1] for r in results)
-    if not any_success:
+    if not success:
         logger.info("")
-        logger.info("All configurations failed. Possible causes:")
+        logger.info("The configured LLM request failed. Possible causes:")
         logger.info("1. API key is invalid or expired")
-        logger.info("2. Key was copied incorrectly (check for extra spaces or missing characters)")
-        logger.info("3. Account doesn't have API access enabled")
-        logger.info("4. Key format changed (MiniMax may use different prefixes now)")
-        logger.info("")
-        logger.info("Please verify your key at: https://www.minimaxi.chat/")
+        logger.info("2. BASE_URL does not match the provider's OpenAI-compatible endpoint")
+        logger.info("3. MODEL is unavailable in the provider account or region")
+        logger.info("4. Account doesn't have model service access enabled")
 
 
 if __name__ == "__main__":

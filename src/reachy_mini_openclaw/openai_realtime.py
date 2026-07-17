@@ -13,24 +13,28 @@ Architecture:
              → Conversations synced back to OpenClaw for memory continuity
 """
 
-import io
-import re
-import json
-import struct
-import base64
 import asyncio
+import base64
+import io
+import json
 import logging
+import os
+import re
+import struct
+import time
+import wave
 from typing import Any, Final, Optional, Tuple
 
 import httpx
 import numpy as np
+from fastrtc import AdditionalOutputs, AsyncStreamHandler, wait_for_item
 from numpy.typing import NDArray
 from openai import AsyncOpenAI
-from fastrtc import AdditionalOutputs, AsyncStreamHandler, wait_for_item
 from scipy.signal import resample
 
 from reachy_mini_openclaw.config import config
-from reachy_mini_openclaw.tools.core_tools import ToolDependencies, get_tool_specs, dispatch_tool_call
+from reachy_mini_openclaw.identity import build_robot_system_instructions
+from reachy_mini_openclaw.tools.core_tools import ToolDependencies, dispatch_tool_call, get_tool_specs
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +43,10 @@ OUTPUT_SAMPLE_RATE: Final[int] = 24000
 VAD_SAMPLE_RATE: Final[int] = 16000
 
 # VAD tuning
-ENERGY_THRESHOLD = 50           # RMS threshold for speech detection (int16 scale)
-SILENCE_FRAMES_THRESHOLD = 25   # ~250ms of silence triggers processing
-MIN_SPEECH_FRAMES = 3           # Minimum frames before considering as real speech
-MAX_SPEECH_SECONDS = 30         # Maximum buffered speech before forcing processing
+ENERGY_THRESHOLD = int(os.getenv("VAD_ENERGY_THRESHOLD", "350"))  # RMS threshold for speech detection.
+SILENCE_FRAMES_THRESHOLD = int(os.getenv("VAD_SILENCE_FRAMES", "8"))  # 8 * 100ms chunks ~= 800ms.
+MIN_SPEECH_FRAMES = int(os.getenv("VAD_MIN_SPEECH_FRAMES", "4"))
+MAX_SPEECH_SECONDS = int(os.getenv("VAD_MAX_SPEECH_SECONDS", "8"))
 
 # Fallback identity when OpenClaw context is unavailable
 FALLBACK_IDENTITY = (
@@ -69,7 +73,8 @@ You are currently embodied in a Reachy Mini robot. You have physical capabilitie
 - Reference your body naturally ("let me look", "I can see...")
 
 **Conversation Style for Voice (CRITICAL):**
-- Keep responses SHORT — 1-3 sentences maximum. You're speaking out loud.
+- Keep responses SHORT — one brief sentence by default. You're speaking out loud.
+- Reply in the user's language.
 - NEVER use bullet points, numbered lists, markdown formatting, or emojis in your responses.
 - Use natural speech patterns ("hmm", "well", "let me see")
 - Be warm, personable, and conversational
@@ -155,10 +160,11 @@ class VoiceHandler(AsyncStreamHandler):
         self._silence_frames = 0
         self._speech_frames = 0
         self._processing = False
+        self._ignore_input_until = 0.0
 
         # Conversation history for multi-turn dialogue (LLM context)
         self._conversation_history: list[dict] = []
-        self._system_instructions: Optional[str] = None
+        self._openclaw_agent_context: Optional[str] = None
 
         # Display history for UI (list of {"role": ..., "content": ...})
         self.display_history: list[dict] = []
@@ -191,13 +197,14 @@ class VoiceHandler(AsyncStreamHandler):
         self._client = AsyncOpenAI(
             api_key=minimax_key,
             base_url=config.MINIMAX_BASE_URL,
+            http_client=httpx.AsyncClient(timeout=30.0, trust_env=config.HTTP_TRUST_ENV),
         )
-        self._http = httpx.AsyncClient(timeout=60.0)
+        self._http = httpx.AsyncClient(timeout=60.0, trust_env=config.HTTP_TRUST_ENV)
         self.start_time = asyncio.get_event_loop().time()
         self.last_activity_time = self.start_time
 
-        # Fetch system prompt once at startup
-        self._system_instructions = await self._build_system_instructions()
+        # Fetch optional OpenClaw context once. The local identity is reloaded per request.
+        await self._build_system_instructions()
         logger.info("Voice handler ready (MiniMax %s + Baidu ASR/TTS)", config.MINIMAX_MODEL)
 
         while not self._shutdown_requested:
@@ -210,6 +217,11 @@ class VoiceHandler(AsyncStreamHandler):
         """Receive one audio frame and run VAD."""
         if self._processing:
             return  # Drop incoming audio while generating a response
+
+        now = asyncio.get_event_loop().time()
+        if now < self._ignore_input_until:
+            self._reset_vad_state()
+            return
 
         input_sr, audio = frame
         audio = audio.flatten()
@@ -255,6 +267,15 @@ class VoiceHandler(AsyncStreamHandler):
             if self._silence_frames >= SILENCE_FRAMES_THRESHOLD:
                 await self._trigger_processing()
 
+    def _reset_vad_state(self) -> None:
+        """Clear buffered audio and listening state."""
+        if self._is_speaking:
+            self.deps.movement_manager.set_listening(False)
+        self._audio_buffer = []
+        self._is_speaking = False
+        self._silence_frames = 0
+        self._speech_frames = 0
+
     async def _trigger_processing(self) -> None:
         """End the current speech segment and kick off the processing pipeline."""
         self.deps.movement_manager.set_listening(False)
@@ -267,7 +288,13 @@ class VoiceHandler(AsyncStreamHandler):
         self._speech_frames = 0
 
         if speech_frames >= MIN_SPEECH_FRAMES:
-            logger.debug("Processing %d speech frames", speech_frames)
+            audio_seconds = sum(len(frame) for frame in buffered) / VAD_SAMPLE_RATE
+            logger.info(
+                "Speech segment ready: %.1fs audio, %d speech frames, %d silence frames",
+                audio_seconds,
+                speech_frames,
+                SILENCE_FRAMES_THRESHOLD,
+            )
             asyncio.create_task(self._process_speech(buffered))
 
     async def emit(self) -> Tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
@@ -296,11 +323,16 @@ class VoiceHandler(AsyncStreamHandler):
         """Full pipeline: audio buffer → STT → LLM → TTS → output queue."""
         self._processing = True
         self.deps.movement_manager.set_processing(True)
+        pipeline_start = time.perf_counter()
         try:
             audio = np.concatenate(audio_frames)
+            audio_seconds = len(audio) / VAD_SAMPLE_RATE
+            logger.info("Processing speech pipeline: %.1fs audio", audio_seconds)
 
             # 1. STT
+            stt_start = time.perf_counter()
             transcript = await self._transcribe(audio)
+            logger.info("Timing: ASR %.2fs", time.perf_counter() - stt_start)
             if not transcript or not transcript.strip():
                 logger.debug("Empty transcript, skipping")
                 return
@@ -312,7 +344,9 @@ class VoiceHandler(AsyncStreamHandler):
             )
 
             # 2. LLM
+            llm_start = time.perf_counter()
             response_text = await self._get_llm_response(transcript)
+            logger.info("Timing: LLM %.2fs", time.perf_counter() - llm_start)
             if not response_text:
                 return
 
@@ -325,6 +359,11 @@ class VoiceHandler(AsyncStreamHandler):
                 AdditionalOutputs({"role": "assistant", "content": response_text})
             )
 
+            if config.ENABLE_AUTO_MOTION:
+                from reachy_mini_openclaw.auto_motion import trigger_auto_motion
+
+                trigger_auto_motion(self.deps, response_text)
+
             # Sync to OpenClaw memory
             if self.openclaw_bridge and self.openclaw_bridge.is_connected:
                 try:
@@ -333,7 +372,10 @@ class VoiceHandler(AsyncStreamHandler):
                     logger.debug("OpenClaw sync failed: %s", e)
 
             # 3. TTS
+            tts_start = time.perf_counter()
             await self._synthesize_and_queue(response_text)
+            logger.info("Timing: TTS %.2fs", time.perf_counter() - tts_start)
+            logger.info("Timing: total %.2fs", time.perf_counter() - pipeline_start)
 
         except Exception as e:
             logger.error("Speech processing error: %s", e, exc_info=True)
@@ -356,14 +398,14 @@ class VoiceHandler(AsyncStreamHandler):
     async def _get_llm_response(self, user_text: str) -> Optional[str]:
         """Get a response from MiniMax M2.7, handling tool calls."""
         messages: list[dict] = [
-            {"role": "system", "content": self._system_instructions or FALLBACK_IDENTITY},
+            {"role": "system", "content": self._get_system_instructions()},
             *self._conversation_history,
             {"role": "user", "content": user_text},
         ]
 
         # Convert Realtime-format tool specs to Chat Completions format
-        tools = [_to_chat_tool_spec(s) for s in get_tool_specs()]
-        if self.openclaw_bridge is not None:
+        tools = [_to_chat_tool_spec(s) for s in get_tool_specs()] if config.ENABLE_LLM_TOOLS else []
+        if config.ENABLE_LLM_TOOLS and self.openclaw_bridge is not None:
             tools.append({
                 "type": "function",
                 "function": {
@@ -396,7 +438,7 @@ class VoiceHandler(AsyncStreamHandler):
                 response = await self._client.chat.completions.create(
                     model=config.MINIMAX_MODEL,
                     messages=messages,
-                    max_tokens=500,
+                    max_tokens=config.MINIMAX_MAX_TOKENS,
                     temperature=0.8,
                     tools=tools or None,
                     tool_choice="auto" if tools else None,
@@ -448,6 +490,9 @@ class VoiceHandler(AsyncStreamHandler):
     @staticmethod
     def _clean_for_tts(text: str) -> str:
         """Strip emojis and markdown formatting not suitable for TTS."""
+        # Remove stage directions such as "*tilts head*" or "（开心地晃了晃）".
+        text = re.sub(r"\*[^*]{1,120}\*", "", text)
+        text = re.sub(r"[（(][^）)]{1,80}[）)]", "", text)
         # Remove emojis (basic Unicode emoji ranges)
         text = re.sub(
             r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
@@ -478,30 +523,29 @@ class VoiceHandler(AsyncStreamHandler):
                 logger.error("Baidu TTS returned no audio")
                 return
 
-            # Baidu TTS returns MP3, decode to PCM
-            try:
-                from pydub import AudioSegment
-                audio_segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-                # Convert to 24kHz mono int16 PCM
-                audio_segment = audio_segment.set_frame_rate(OUTPUT_SAMPLE_RATE).set_channels(1)
-                samples = np.array(audio_segment.get_array_of_samples(), dtype=np.int16)
-            except ImportError:
-                # Fallback: try using ffmpeg directly if pydub not available
-                logger.warning("pydub not installed, trying ffmpeg fallback for MP3 decoding")
-                import subprocess
-                proc = subprocess.run(
-                    ["ffmpeg", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le",
-                     "-ar", str(OUTPUT_SAMPLE_RATE), "-ac", "1", "pipe:1"],
-                    input=audio_bytes,
-                    capture_output=True,
-                )
-                if proc.returncode != 0:
-                    logger.error("ffmpeg MP3 decode failed: %s", proc.stderr.decode())
-                    return
-                samples = np.frombuffer(proc.stdout, dtype=np.int16)
+            # Baidu TTS returns WAV so we can decode it with the standard library.
+            with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+                channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+                sample_rate = wav_file.getframerate()
+                pcm_bytes = wav_file.readframes(wav_file.getnframes())
+
+            if sample_width != 2:
+                logger.error("Unsupported Baidu TTS sample width: %d bytes", sample_width)
+                return
+
+            samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+            if channels > 1:
+                samples = samples.reshape(-1, channels).mean(axis=1).astype(np.int16)
+
+            if sample_rate != OUTPUT_SAMPLE_RATE:
+                num_samples = int(len(samples) * OUTPUT_SAMPLE_RATE / sample_rate)
+                samples = resample(samples.astype(np.float32), num_samples).astype(np.int16)
 
             logger.info("Baidu TTS: %d samples (%.1fs)", len(samples), len(samples) / OUTPUT_SAMPLE_RATE)
             await self.output_queue.put((OUTPUT_SAMPLE_RATE, samples.reshape(1, -1)))
+            audio_duration = len(samples) / OUTPUT_SAMPLE_RATE
+            self._ignore_input_until = asyncio.get_event_loop().time() + audio_duration + 0.8
             self.last_activity_time = asyncio.get_event_loop().time()
 
         except Exception as e:
@@ -512,7 +556,7 @@ class VoiceHandler(AsyncStreamHandler):
     # ------------------------------------------------------------------
 
     async def _build_system_instructions(self) -> str:
-        """Combine OpenClaw agent context with robot body instructions."""
+        """Fetch optional OpenClaw context and build the current system prompt."""
         agent_context = None
         if self.openclaw_bridge and self.openclaw_bridge.is_connected:
             logger.info("Fetching agent context from OpenClaw...")
@@ -520,10 +564,20 @@ class VoiceHandler(AsyncStreamHandler):
 
         if agent_context:
             logger.info("Using OpenClaw agent context (%d chars)", len(agent_context))
-            return f"{agent_context}\n\n{ROBOT_BODY_INSTRUCTIONS}"
+        else:
+            logger.info("OpenClaw context unavailable; using local robot identity only")
 
-        logger.warning("Could not fetch OpenClaw context, using fallback identity")
-        return f"{FALLBACK_IDENTITY}\n\n{ROBOT_BODY_INSTRUCTIONS}"
+        self._openclaw_agent_context = agent_context
+        return self._get_system_instructions()
+
+    def _get_system_instructions(self) -> str:
+        """Reload the local identity and compose instructions for one LLM request."""
+        return build_robot_system_instructions(
+            config.ROBOT_IDENTITY_FILE,
+            FALLBACK_IDENTITY,
+            ROBOT_BODY_INSTRUCTIONS,
+            supplemental_context=self._openclaw_agent_context,
+        )
 
     # ------------------------------------------------------------------
     # OpenClaw tool handler

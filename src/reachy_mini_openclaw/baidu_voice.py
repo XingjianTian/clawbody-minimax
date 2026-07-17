@@ -37,7 +37,7 @@ class BaiduVoiceClient:
         self.api_key = config.BAIDU_API_KEY
         self.secret_key = config.BAIDU_SECRET_KEY
         self.app_id = config.BAIDU_APP_ID
-        self.http = httpx.AsyncClient(timeout=30.0)
+        self.http = httpx.AsyncClient(timeout=30.0, trust_env=config.HTTP_TRUST_ENV)
 
     async def _get_access_token(self) -> str:
         """Fetch or reuse cached access token."""
@@ -132,7 +132,7 @@ class BaiduVoiceClient:
             text: Text to synthesize (max 1024 bytes UTF-8)
 
         Returns:
-            MP3 audio bytes or None if failed
+            WAV audio bytes or None if failed
         """
         token = await self._get_access_token()
 
@@ -153,7 +153,7 @@ class BaiduVoiceClient:
             "pit": config.BAIDU_TTS_PIT,
             "vol": config.BAIDU_TTS_VOL,
             "per": config.BAIDU_TTS_PER,
-            "aue": 3,  # MP3 format
+            "aue": 6,  # WAV format; avoids requiring ffmpeg for MP3 decoding.
         }
 
         response = await self.http.post(BAIDU_TTS_URL, data=params)
@@ -168,8 +168,8 @@ class BaiduVoiceClient:
             logger.error("Baidu TTS error %d: %s", err_no, err_msg)
             return None
 
-        # Success: binary audio data (MP3)
-        logger.info("Baidu TTS: %d bytes MP3", len(response.content))
+        # Success: binary audio data (WAV)
+        logger.info("Baidu TTS: %d bytes WAV", len(response.content))
         return response.content
 
     async def close(self) -> None:
