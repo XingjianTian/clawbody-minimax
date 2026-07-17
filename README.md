@@ -120,6 +120,8 @@ clawbody --gradio
 
 ### With Docker Desktop
 
+See the step-by-step Chinese setup guide: [DOCKER_SETUP.md](DOCKER_SETUP.md).
+
 For a new Windows computer, clone the repository, create a local configuration,
 then start the robot and container:
 
@@ -150,6 +152,30 @@ PowerShell commands are:
 docker compose ps
 docker compose logs -f clawbody
 docker compose down
+```
+
+### Preview Local Changes
+
+Use the preview service while changing the web UI or Python source. It mounts
+the local `src/` directory into the existing image, so it does not rebuild or
+download dependencies. It runs separately at <http://localhost:7861> and does
+not affect the normal service on port 7860.
+
+```powershell
+# Start the local-source preview once
+docker compose -f docker-compose.preview.yml up -d
+
+# After changing Python or UI files, restart in a few seconds without rebuilding
+docker compose -f docker-compose.preview.yml restart clawbody-preview
+
+# Stop the preview when it is no longer needed
+docker compose -f docker-compose.preview.yml down
+```
+
+After the preview is approved, update the normal service once:
+
+```powershell
+docker compose up -d --build
 ```
 
 ### Customize Robot Identity and Tone

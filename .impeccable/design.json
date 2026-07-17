@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-17T14:00:00+08:00",
+  "title": "Design System: 心宠 Conversation Console",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "实验台画布",
+        "canonical": "#F5F5F7",
+        "tonalRamp": ["#FFFFFF", "#F5F5F7", "#ECECF0", "#D2D2D7"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "器件表面",
+        "canonical": "#FCFCFD",
+        "tonalRamp": ["#FCFCFD", "#F5F5F7", "#ECECF0"]
+      },
+      "ink": {
+        "role": "primary",
+        "displayName": "石墨操作色",
+        "canonical": "#1D1D1F",
+        "tonalRamp": ["#6E6E73", "#515154", "#1D1D1F"]
+      },
+      "signal": {
+        "role": "primary",
+        "displayName": "信号琥珀",
+        "canonical": "#E49B0F",
+        "tonalRamp": ["#FFF6E5", "#F7C766", "#E49B0F", "#8A5700"]
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "运行绿色",
+        "canonical": "#16734B",
+        "tonalRamp": ["#EAF7F0", "#62AE87", "#16734B"]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "故障红色",
+        "canonical": "#B42318",
+        "tonalRamp": ["#FDEDEA", "#E4776E", "#B42318"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "页面标题",
+        "purpose": "每页唯一的一级标题。"
+      },
+      "headline": {
+        "displayName": "任务标题",
+        "purpose": "页面内主要工作区标题。"
+      },
+      "body": {
+        "displayName": "正文与对话",
+        "purpose": "说明、配置值和聊天内容。"
+      },
+      "label": {
+        "displayName": "控件标签",
+        "purpose": "字段、按钮和导航。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "overlay",
+        "value": "0 6px 16px rgb(29 29 31 / 0.12)",
+        "purpose": "下拉菜单、工具提示和临时浮层。"
+      },
+      {
+        "name": "focus",
+        "value": "0 0 0 3px rgb(228 155 15 / 0.24)",
+        "purpose": "键盘焦点反馈。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "180ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "悬停、焦点、标签和状态切换。"
+      },
+      {
+        "name": "state-medium",
+        "value": "240ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "面板展开和消息出现。"
+      }
+    ],
+    "breakpoints": [
+      {"name": "mobile", "value": "640px"},
+      {"name": "stack", "value": "960px"},
+      {"name": "desktop", "value": "1200px"},
+      {"name": "wide", "value": "1440px"}
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "开始、应用和保存等单一主命令。",
+      "html": "<button class=\"ds-button-primary\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><polygon points=\"6 3 20 12 6 21 6 3\"></polygon></svg><span>开始对话</span></button>",
+      "css": ".ds-button-primary{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:52px;padding:0 24px;border:1px solid #1D1D1F;border-radius:8px;background:#1D1D1F;color:#FCFCFD;font:600 17px/1 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;transition:background 180ms cubic-bezier(.16,1,.3,1),transform 180ms cubic-bezier(.16,1,.3,1),box-shadow 180ms cubic-bezier(.16,1,.3,1)}.ds-button-primary svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.ds-button-primary:hover{background:#353538}.ds-button-primary:focus-visible{outline:0;box-shadow:0 0 0 3px rgb(228 155 15 / .28)}.ds-button-primary:active{transform:scale(.98)}.ds-button-primary:disabled{background:#D2D2D7;border-color:#D2D2D7;color:#6E6E73}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "停止、取消和次级命令。",
+      "html": "<button class=\"ds-button-secondary\">停止</button>",
+      "css": ".ds-button-secondary{height:52px;padding:0 24px;border:1px solid #D2D2D7;border-radius:8px;background:#FCFCFD;color:#1D1D1F;font:600 17px/1 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;transition:background 180ms cubic-bezier(.16,1,.3,1),border-color 180ms cubic-bezier(.16,1,.3,1),transform 180ms cubic-bezier(.16,1,.3,1)}.ds-button-secondary:hover{background:#F5F5F7;border-color:#A8A8AD}.ds-button-secondary:focus-visible{outline:0;box-shadow:0 0 0 3px rgb(228 155 15 / .28)}.ds-button-secondary:active{transform:scale(.98)}"
+    },
+    {
+      "name": "Identity Search Field",
+      "kind": "input",
+      "refersTo": "field-search",
+      "description": "带 Lucide Search 图标的身份选择与搜索控件。",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">选择身份配置</span><span class=\"ds-search\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"></circle><path d=\"m21 21-4.3-4.3\"></path></svg><input placeholder=\"搜索或选择身份\" /></span></label>",
+      "css": ".ds-field{display:grid;gap:8px;color:#1D1D1F;font:600 15px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}.ds-search{position:relative;display:block}.ds-search svg{position:absolute;left:16px;top:16px;width:20px;height:20px;fill:none;stroke:#515154;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.ds-search input{box-sizing:border-box;width:100%;height:52px;padding:0 44px;border:1px solid transparent;border-radius:8px;background:#ECECF0;color:#1D1D1F;font:400 17px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;transition:background 180ms cubic-bezier(.16,1,.3,1),border-color 180ms cubic-bezier(.16,1,.3,1),box-shadow 180ms cubic-bezier(.16,1,.3,1)}.ds-search input::placeholder{color:#515154}.ds-search input:hover{border-color:#A8A8AD}.ds-search input:focus{outline:0;background:#FCFCFD;border-color:#8A5700;box-shadow:0 0 0 3px rgb(228 155 15 / .24)}"
+    },
+    {
+      "name": "Text Area",
+      "kind": "input",
+      "description": "身份、记忆和语气说明的长文本编辑区。",
+      "html": "<label class=\"ds-area-field\"><span>身份与语气说明</span><textarea placeholder=\"填写名字、性格、记忆和说话方式……\"></textarea></label>",
+      "css": ".ds-area-field{display:grid;gap:8px;color:#1D1D1F;font:600 15px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}.ds-area-field textarea{box-sizing:border-box;min-height:220px;padding:14px 16px;resize:vertical;border:1px solid #D2D2D7;border-radius:8px;background:#FCFCFD;color:#1D1D1F;font:400 17px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;transition:border-color 180ms cubic-bezier(.16,1,.3,1),box-shadow 180ms cubic-bezier(.16,1,.3,1)}.ds-area-field textarea::placeholder{color:#515154}.ds-area-field textarea:hover{border-color:#A8A8AD}.ds-area-field textarea:focus{outline:0;border-color:#8A5700;box-shadow:0 0 0 3px rgb(228 155 15 / .24)}"
+    },
+    {
+      "name": "Live Status",
+      "kind": "chip",
+      "description": "在设备栏和会话区显示真实运行状态。",
+      "html": "<span class=\"ds-status ds-status-live\"><i></i>正在听你说话</span>",
+      "css": ".ds-status{display:inline-flex;align-items:center;gap:9px;min-height:36px;padding:0 12px;border-radius:8px;background:#FFF6E5;color:#8A5700;font:600 15px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}.ds-status i{width:9px;height:9px;border-radius:50%;background:#E49B0F;box-shadow:0 0 0 4px rgb(228 155 15 / .16)}"
+    },
+    {
+      "name": "Configuration Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "会话侧栏中的分隔列表，不使用彩色大底。",
+      "html": "<section class=\"ds-panel\"><h3>会话配置</h3><dl><div><dt>语音输入</dt><dd>百度语音识别</dd></div><div><dt>对话模型</dt><dd>qwen-plus</dd></div><div><dt>动作表达</dt><dd>已启用</dd></div></dl></section>",
+      "css": ".ds-panel{box-sizing:border-box;padding:24px;border:1px solid #D2D2D7;border-radius:8px;background:#FCFCFD;color:#1D1D1F;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}.ds-panel h3{margin:0 0 16px;font-size:20px;line-height:1.4}.ds-panel dl{margin:0}.ds-panel dl div{display:grid;grid-template-columns:minmax(92px,.8fr) 1.2fr;gap:16px;padding:14px 0;border-top:1px solid #ECECF0}.ds-panel dt{color:#515154;font-size:15px}.ds-panel dd{margin:0;color:#1D1D1F;font-size:16px;font-weight:600;text-align:right}"
+    },
+    {
+      "name": "Conversation Empty State",
+      "kind": "custom",
+      "description": "尚无消息时给出一个明确起点。",
+      "html": "<section class=\"ds-empty\"><div class=\"ds-empty-icon\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\"><path d=\"M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z\"></path><path d=\"M19 10v2a7 7 0 0 1-14 0v-2\"></path><path d=\"M12 19v3\"></path></svg></div><h3>还没有对话</h3><p>启动后，对着麦克风自然说话即可。</p></section>",
+      "css": ".ds-empty{display:grid;place-items:center;align-content:center;min-height:360px;padding:32px;text-align:center;color:#1D1D1F;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}.ds-empty-icon{display:grid;place-items:center;width:48px;height:48px;margin-bottom:16px;border-radius:50%;background:#ECECF0;color:#8A5700}.ds-empty-icon svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.ds-empty h3{margin:0;font-size:20px;line-height:1.4}.ds-empty p{margin:8px 0 0;color:#515154;font-size:17px;line-height:1.65}"
+    }
+  ],
+  "narrative": {
+    "northStar": "银色实验台",
+    "overview": "面向明亮实验室中的机器人专家。界面像精密消费电子控制台一样清晰、克制、可信，所有动效都对应机器人的真实状态。",
+    "keyCharacteristics": [
+      "冷白银灰底与石墨文字",
+      "少量信号琥珀",
+      "大号中文与显式状态",
+      "标准控件和语义动效"
+    ],
+    "rules": [
+      {
+        "name": "The Signal Rule",
+        "body": "信号色只用于主要操作、当前选择和真实状态，单屏占比不超过 8%。",
+        "section": "colors"
+      },
+      {
+        "name": "The Flat-by-Default Rule",
+        "body": "页面区块默认无阴影，深度主要由色调层级和分隔线表达。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "使用可见标签、前置 Lucide 图标和清晰输入边界。",
+      "让监听、思考、说话和错误状态在文案与动效上明确区分。",
+      "在宽屏、桌面、平板和移动端验证无黑边与无溢出。"
+    ],
+    "donts": [
+      "不要使用黑色大面板、紫蓝渐变、薄荷绿大底或珊瑚红大按钮区。",
+      "不要把标签隐藏进占位符，也不要全局覆盖 Gradio 的 .wrap。",
+      "不要用字符代替图标、嵌套卡片或播放无意义的循环动效。"
+    ]
+  }
+}

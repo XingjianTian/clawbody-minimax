@@ -65,3 +65,6 @@ uv.lock
 # Test audio files
 test_tts_output_*.mp3
 *.mp3
+
+# Local-only frontend design references
+references/

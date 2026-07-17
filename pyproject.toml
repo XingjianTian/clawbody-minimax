@@ -110,6 +110,9 @@ Issues = "https://github.com/yourusername/clawbody/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+reachy_mini_openclaw = ["assets/*.jpg"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

@@ -1,0 +1,38 @@
+services:
+  clawbody-preview:
+    image: clawbody-minimax-clawbody
+    container_name: clawbody-preview
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app/src
+      ROBOT_HOST: host.docker.internal
+      ROBOT_PORT: "8000"
+      ENABLE_CAMERA: "false"
+      ENABLE_FACE_TRACKING: "false"
+      ENABLE_LLM_TOOLS: "false"
+      ENABLE_AUTO_MOTION: "true"
+      ROBOT_IDENTITY_FILE: /app/robot_identity/AGENTS.md
+    volumes:
+      - type: bind
+        source: ./src
+        target: /app/src
+        read_only: true
+      - type: bind
+        source: ./robot_identity
+        target: /app/robot_identity
+        read_only: true
+    ports:
+      - "7861:7860"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - clawbody
+      - --gradio
+      - --robot-host
+      - host.docker.internal
+      - --robot-port
+      - "8000"
+      - --no-openclaw
+      - --no-camera
+      - --no-face-tracking
