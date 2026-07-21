@@ -289,6 +289,44 @@ async def test_stop_never_terminates_reused_external_daemon():
 
 
 @async_test
+async def test_stop_during_external_readiness_reports_not_owned_without_cancelling():
+    readiness_started = asyncio.Event()
+    release_readiness = asyncio.Event()
+    daemon_client = daemon_client_ready()
+    daemon_client.status.return_value = {"state": "starting", "version": "1.8.0"}
+
+    async def wait_for_external_ready(*, timeout: float) -> dict[str, str]:
+        readiness_started.set()
+        await release_readiness.wait()
+        return {"state": "running", "version": "1.8.0"}
+
+    daemon_client.wait_until_ready.side_effect = wait_for_external_ready
+    manager, process_factory, _, _ = make_manager(daemon_client=daemon_client)
+
+    started = await manager.start(StartRequest())
+    await readiness_started.wait()
+    operation_task = manager._operation_task
+    assert operation_task is not None
+
+    stopped = await manager.stop()
+
+    assert stopped.operation_id == started.operation_id
+    assert stopped.phase == DevicePhase.ERROR
+    assert stopped.error is not None
+    assert stopped.error.code == "daemon_not_owned"
+    assert operation_task.done() is False
+    process_factory.assert_not_called()
+    daemon_client.perform.assert_not_awaited()
+
+    release_readiness.set()
+    await operation_task
+    daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
+    ready = await manager.status()
+    assert ready.phase == DevicePhase.READY
+    assert ready.daemon_owned is False
+
+
+@async_test
 async def test_start_probes_and_reuses_an_external_daemon_without_spawning():
     manager, process_factory, daemon_client, _ = make_manager()
     daemon_client.status.side_effect = None

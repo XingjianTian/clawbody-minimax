@@ -89,6 +89,7 @@ class DaemonManager:
         self._lock = asyncio.Lock()
         self._operation_task: asyncio.Task[None] | None = None
         self._stop_requested_operation_id: str | None = None
+        self._external_operation_id: str | None = None
         self._process: ManagedProcess | None = None
         self._owned_pid: int | None = None
         self._status = DeviceStatus()
@@ -125,6 +126,15 @@ class DaemonManager:
         async with self._lock:
             operation_task = self._operation_task
             operation_active = operation_task is not None and not operation_task.done()
+            if operation_active and self._external_operation_id == self._status.operation_id:
+                self._set_error(
+                    DeviceError(
+                        code="daemon_not_owned",
+                        phase=DevicePhase.STOPPING,
+                        message="The running Reachy daemon is not owned by this Host Bridge.",
+                    )
+                )
+                return self._copy_status()
             if operation_active:
                 self._stop_requested_operation_id = self._status.operation_id
             process = self._process
@@ -332,6 +342,7 @@ class DaemonManager:
                 async with self._lock:
                     if self._status.operation_id != operation_id:
                         return
+                    self._external_operation_id = operation_id
                     self._apply_daemon_status(listening_status)
                     self._status.phase = DevicePhase.CONNECTING
 
@@ -422,6 +433,10 @@ class DaemonManager:
                         detail=detail,
                     )
                 )
+        finally:
+            async with self._lock:
+                if self._external_operation_id == operation_id:
+                    self._external_operation_id = None
 
     async def _wait_for_daemon_listening(
         self,
