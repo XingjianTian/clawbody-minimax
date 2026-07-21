@@ -65,24 +65,34 @@ class ReachyDaemonClient:
         poll_interval: float = 0.5,
     ) -> dict[str, Any]:
         """Wait until the daemon reports a running or ready state."""
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
 
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                daemon_status = await self.status()
+                daemon_status = await asyncio.wait_for(self.status(), timeout=remaining)
                 state = str(daemon_status.get("state", "")).lower()
                 if state in {"running", "ready"}:
                     return daemon_status
-            except (DaemonRequestError, httpx.HTTPError) as error:
+            except (DaemonRequestError, httpx.HTTPError, TimeoutError) as error:
                 last_error = error
 
-            if time.monotonic() >= deadline:
-                message = "Reachy daemon did not become ready before the timeout"
-                if last_error is not None:
-                    raise TimeoutError(message) from last_error
-                raise TimeoutError(message)
-            await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(poll_interval, remaining))
+
+        message = "Reachy daemon did not become ready before the timeout"
+        if last_error is not None:
+            raise TimeoutError(message) from last_error
+        raise TimeoutError(message)
 
     async def snapshot(self) -> dict[str, Any]:
         """Return daemon, motor, app, and best-effort media state."""
@@ -92,7 +102,7 @@ class ReachyDaemonClient:
         camera_specs = await self._optional_object("/api/camera/specs")
         speaker_volume = await self._optional_object("/api/volume/current")
         microphone_volume = await self._optional_object("/api/volume/microphone/current")
-        app_status = await self._optional_value("/api/apps/current-app-status")
+        app_status = await self._optional_object("/api/apps/current-app-status")
 
         media_available = media_status.get("available") if media_status is not None else None
         media = MediaStatus(
@@ -120,11 +130,15 @@ class ReachyDaemonClient:
                 "/api/move/goto",
                 json={"antennas": [0.7, -0.7], "duration": 0.4, "interpolation": "minjerk"},
             )
-            await asyncio.sleep(0.4)
-            return await self._post_object(
-                "/api/move/goto",
-                json={"antennas": [0.0, 0.0], "duration": 0.4, "interpolation": "minjerk"},
-            )
+            try:
+                await asyncio.sleep(0.4)
+            except asyncio.CancelledError:
+                try:
+                    await self._center_antennas()
+                except Exception:
+                    pass
+                raise
+            return await self._center_antennas()
         raise ValueError(f"Unsupported device action: {action}")
 
     async def set_pose(self, pose: PoseRequest) -> dict[str, Any]:
@@ -158,8 +172,14 @@ class ReachyDaemonClient:
     async def _optional_value(self, path: str) -> Any | None:
         try:
             return await self._get_value(path)
-        except (DaemonRequestError, httpx.HTTPError):
+        except (DaemonRequestError, httpx.HTTPError, json.JSONDecodeError):
             return None
+
+    async def _center_antennas(self) -> dict[str, Any]:
+        return await self._post_object(
+            "/api/move/goto",
+            json={"antennas": [0.0, 0.0], "duration": 0.4, "interpolation": "minjerk"},
+        )
 
     async def _request_value(self, method: str, path: str, **kwargs: Any) -> Any:
         response = await self._client.request(method, path, **kwargs)
@@ -208,7 +228,7 @@ def _response_detail(response: httpx.Response) -> str:
     except json.JSONDecodeError:
         return response.text
     if isinstance(payload, dict) and "detail" in payload:
-        detail = payload["detail"]
+        detail = _sanitize_detail(payload["detail"])
         return detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
     return response.text
 
@@ -217,3 +237,22 @@ def _redact_detail(detail: str) -> str:
     for pattern in REDACTIONS:
         detail = pattern.sub(r"\1[REDACTED]", detail)
     return detail
+
+
+def _sanitize_detail(value: Any) -> Any:
+    """Recursively redact credential-bearing values from structured errors."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if _is_sensitive_key(key) else _sanitize_detail(nested_value)
+            for key, nested_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_detail(item) for item in value]
+    return value
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = "".join(character for character in key.lower() if character.isalnum())
+    return any(marker in normalized for marker in ("apikey", "token", "secret", "password", "authorization", "auth"))
