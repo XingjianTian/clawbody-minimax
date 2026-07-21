@@ -100,6 +100,8 @@ dev = [
 [project.scripts]
 clawbody = "reachy_mini_openclaw.main:main"
 clawbody-service = "reachy_mini_openclaw.service_api:main"
+clawbody-host-bridge = "reachy_mini_openclaw.host_bridge.api:main"
+clawbody-host = "reachy_mini_openclaw.host_bridge.autostart:main"
 
 [project.entry-points."reachy_mini_apps"]
 clawbody = "reachy_mini_openclaw.main:ClawBodyApp"
