@@ -8,13 +8,13 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import httpx
 
 from .daemon_client import ReachyDaemonClient
-from .log_store import LogStore
+from .log_store import LogLevel, LogStore
 from .models import (
     DeviceAction,
     DeviceError,
@@ -48,8 +48,11 @@ ACTIVE_PHASES = {
 class ManagedProcess(Protocol):
     """The subprocess surface required by the lifecycle manager."""
 
-    pid: int
-    stdout: Iterable[str] | None
+    @property
+    def pid(self) -> int: ...
+
+    @property
+    def stdout(self) -> Iterable[str] | None: ...
 
     def poll(self) -> int | None: ...
 
@@ -62,6 +65,12 @@ class ManagedProcess(Protocol):
 
 ProcessFactory = Callable[..., ManagedProcess]
 PortDiscovery = Callable[[], Iterable[str] | str | None]
+
+
+class _SerialPortFinder(Protocol):
+    """Typed boundary for Reachy's serial-port helper."""
+
+    def __call__(self, *, wireless_version: bool, vid: str, pid: str) -> Iterable[str] | str | None: ...
 
 
 class _DaemonExitedError(RuntimeError):
@@ -82,7 +91,7 @@ class DaemonManager:
         clawbody_health_url: str = "http://127.0.0.1:7860/health",
     ) -> None:
         self._discover_ports = discover_ports or _default_discover_ports
-        self._process_factory = process_factory or subprocess.Popen
+        self._process_factory = process_factory or _default_process_factory
         self._daemon_client = daemon_client or ReachyDaemonClient()
         self._logs = logs or LogStore()
         self._clawbody_health_url = clawbody_health_url
@@ -140,7 +149,7 @@ class DaemonManager:
             process = self._process
             owned_pid = self._owned_pid
             if process is None or owned_pid is None:
-                if operation_active:
+                if operation_task is not None and not operation_task.done():
                     operation_task.cancel()
                     self._status.phase = DevicePhase.STOPPING
                 else:
@@ -164,7 +173,7 @@ class DaemonManager:
             else:
                 self._status.phase = DevicePhase.STOPPING
                 self._status.error = None
-                if operation_active:
+                if operation_task is not None and not operation_task.done():
                     operation_task.cancel()
 
         if operation_task is not None and not operation_task.done():
@@ -371,7 +380,7 @@ class DaemonManager:
                     self._status.serial_port = serial_port
 
                 command = [sys.executable, *(part.format(serial_port=serial_port) for part in DAEMON_COMMAND)]
-                process = self._process_factory(
+                started_process = self._process_factory(
                     command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -381,22 +390,22 @@ class DaemonManager:
                     errors="replace",
                     bufsize=1,
                     creationflags=(
-                        getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                     ),
                 )
+                process = started_process
                 async with self._lock:
                     if self._status.operation_id != operation_id:
                         return
-                    self._process = process
-                    self._owned_pid = process.pid
+                    self._process = started_process
+                    self._owned_pid = started_process.pid
                     self._status.daemon_owned = True
-                    self._status.daemon_pid = process.pid
+                    self._status.daemon_pid = started_process.pid
                     self._status.phase = DevicePhase.CONNECTING
-                self._logs.append("info", f"Started owned Reachy daemon PID {process.pid} on {serial_port}")
-                self._start_output_thread(process)
+                self._logs.append("info", f"Started owned Reachy daemon PID {started_process.pid} on {serial_port}")
+                self._start_output_thread(started_process)
 
-                listening_status = await self._wait_for_daemon_listening(process, timeout=15.0)
+                listening_status = await self._wait_for_daemon_listening(started_process, timeout=15.0)
             else:
                 async with self._lock:
                     if self._status.operation_id != operation_id:
@@ -438,41 +447,43 @@ class DaemonManager:
             if self._stop_requested_operation_id == operation_id:
                 raise
             cancellation_phase = self._status.phase
-            cleanup_error: Exception | None = None
+            cancellation_cleanup_error: Exception | None = None
             if process is not None and await self._still_owns(process, process.pid):
                 try:
                     await asyncio.shield(self._terminate_recorded_process(process, process.pid))
                 except Exception as error:
-                    cleanup_error = error
+                    cancellation_cleanup_error = error
             async with self._lock:
                 if process is not None and self._process is process and process.poll() is not None:
                     self._record_process_exit(process.pid, process.poll() or 0, expected=True)
                 self._set_error(
                     DeviceError(
-                        code="startup_cancel_failed" if cleanup_error is not None else "startup_cancelled",
+                        code=(
+                            "startup_cancel_failed" if cancellation_cleanup_error is not None else "startup_cancelled"
+                        ),
                         phase=cancellation_phase,
                         message=(
                             "Startup was cancelled but the owned daemon could not be stopped."
-                            if cleanup_error is not None
+                            if cancellation_cleanup_error is not None
                             else "Reachy daemon startup was cancelled."
                         ),
-                        detail=str(cleanup_error) if cleanup_error is not None else None,
+                        detail=str(cancellation_cleanup_error) if cancellation_cleanup_error is not None else None,
                     )
                 )
             raise
         except _DaemonExitedError as error:
             async with self._lock:
-                if self._process is process and self._owned_pid == process.pid:
+                if process is not None and self._process is process and self._owned_pid == process.pid:
                     self._record_process_exit(process.pid, error.returncode, expected=False)
         except Exception as startup_error:
             phase = self._status.phase
             self._logs.append("error", f"Reachy daemon startup failed during {phase.value}: {startup_error}")
-            cleanup_error: Exception | None = None
+            failure_cleanup_error: Exception | None = None
             if process is not None and await self._still_owns(process, process.pid):
                 try:
                     await self._terminate_recorded_process(process, process.pid)
                 except Exception as cleanup_exception:
-                    cleanup_error = cleanup_exception
+                    failure_cleanup_error = cleanup_exception
                     self._logs.append(
                         "error",
                         "Owned Reachy daemon PID "
@@ -482,8 +493,8 @@ class DaemonManager:
                 if process is not None and self._process is process and process.poll() is not None:
                     self._record_process_exit(process.pid, process.poll() or 0, expected=True)
                 detail = str(startup_error)
-                if cleanup_error is not None:
-                    detail = f"{detail}; cleanup failed: {cleanup_error}"
+                if failure_cleanup_error is not None:
+                    detail = f"{detail}; cleanup failed: {failure_cleanup_error}"
                 self._set_error(
                     DeviceError(
                         code=_startup_error_code(phase),
@@ -592,7 +603,7 @@ class DaemonManager:
             if not message:
                 continue
             upper = message.upper()
-            level = "error" if "ERROR" in upper else "warning" if "WARNING" in upper else "info"
+            level: LogLevel = "error" if "ERROR" in upper else "warning" if "WARNING" in upper else "info"
             self._logs.append(level, message)
 
         if process is None or pid is None:
@@ -718,7 +729,33 @@ class DaemonManager:
 def _default_discover_ports() -> Iterable[str] | str | None:
     from reachy_mini.daemon.utils import find_serial_port
 
-    return find_serial_port(wireless_version=False, vid="1a86", pid="55d3")
+    typed_find_serial_port = cast(_SerialPortFinder, find_serial_port)
+    return typed_find_serial_port(wireless_version=False, vid="1a86", pid="55d3")
+
+
+def _default_process_factory(
+    command: list[str],
+    *,
+    stdout: int,
+    stderr: int,
+    stdin: int,
+    text: bool,
+    encoding: str,
+    errors: str,
+    bufsize: int,
+    creationflags: int,
+) -> ManagedProcess:
+    return subprocess.Popen(
+        command,
+        stdout=stdout,
+        stderr=stderr,
+        stdin=stdin,
+        text=text,
+        encoding=encoding,
+        errors=errors,
+        bufsize=bufsize,
+        creationflags=creationflags,
+    )
 
 
 def _normalize_ports(value: Iterable[str] | str | None) -> list[str]:

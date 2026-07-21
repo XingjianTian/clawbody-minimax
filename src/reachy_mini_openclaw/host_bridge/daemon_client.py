@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import time
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
 import httpx
 
@@ -18,6 +18,7 @@ ACTION_PATHS = {
     DeviceAction.GOTO_SLEEP: "/api/move/play/goto_sleep",
     DeviceAction.TEST_SOUND: "/api/volume/test-sound",
 }
+_MediaComponentState = Literal["ready", "unavailable", "unknown"]
 
 
 class DaemonRequestError(RuntimeError):
@@ -191,7 +192,7 @@ class ReachyDaemonClient:
     def _media_component_state(
         media_available: Any,
         component_response: dict[str, Any] | None,
-    ) -> str:
+    ) -> _MediaComponentState:
         if media_available is False:
             return "unavailable"
         if component_response is None:
