@@ -222,7 +222,8 @@ Host Bridge starts the Reachy daemon at `127.0.0.1:8000` when Sentinel requests
 Open this repository in Docker Desktop as a Compose project and click **Run**.
 The container starts the private `clawbody-service` process and connects to the
 host daemon through `host.docker.internal:8000`. It does not publish a web page;
-Sentinel reaches it through the private container network. The first build
+Sentinel reaches it through the host-published loopback endpoint
+`http://127.0.0.1:7860`. The first build
 downloads and compiles robot dependencies, so it can take several minutes.
 
 The local `.env` file is passed into the container at startup, so keep the

@@ -89,7 +89,7 @@ HOST_BRIDGE_CLAWBODY_HEALTH_URL=http://127.0.0.1:7860/health
 可以执行以下命令生成随机值，每次执行一次，分别填写 Host Bridge 与 ClawBody service 的密钥：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+py -3.11 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 Sentinel 服务端需要配置 `HOST_BRIDGE_URL=http://127.0.0.1:7861`，并使用与本项目 `.env` 完全相同的 `HOST_BRIDGE_API_KEY`。Host Bridge 在密钥为空或仍为示例占位值时会拒绝启动。不得把 Host Bridge 密钥放进 `NEXT_PUBLIC_*` 变量或浏览器代码。不要把任何真实 API 密钥粘贴到本文档、Issue、聊天群或 Git 提交中。
@@ -303,7 +303,15 @@ Test-NetConnection localhost -Port 7860
 
 ### 能动作但没有声音
 
-在心宠控制软件中检查扬声器设备和音量；同时确认 Windows 默认输出设备正确，再查看 `docker compose logs -f clawbody` 中是否有 TTS 错误。
+保持 Reachy Mini Control 关闭。在 Sentinel 的“心宠调试”确认扬声器状态可用、输出音量不为 0，并执行“测试声音”。也可以只读检查 Host Bridge 启动的 daemon：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/media/status
+Invoke-RestMethod http://127.0.0.1:8000/api/volume/current
+docker compose logs --tail 100 clawbody
+```
+
+如果 daemon 扬声器状态不可用，先在“心宠调试”停止并重新启动设备；如果 daemon 状态与音量正常，则检查容器日志中的 Baidu TTS、音频通道或播放错误。不要打开 Reachy Mini Control 与 Host Bridge 争用设备。
 
 ### ASR、TTS 或 LLM 报错
 
