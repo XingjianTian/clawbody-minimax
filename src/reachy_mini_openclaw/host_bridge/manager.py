@@ -105,15 +105,18 @@ class DaemonManager:
                 return self._copy_status()
             if self._owns_live_process():
                 return self._copy_status()
-            if (
-                not self._status.daemon_owned
-                and self._status.phase == DevicePhase.READY
-                and (self._status.daemon_state or "").lower() in {"running", "ready"}
-            ):
+            try:
+                external_status = await asyncio.wait_for(self._daemon_client.status(), timeout=1.0)
+            except Exception:
+                external_status = None
+            if external_status is not None and _daemon_is_ready(external_status):
+                self._status = DeviceStatus(
+                    phase=DevicePhase.READY,
+                    daemon_state=_string_value(external_status.get("state")),
+                    daemon_version=_string_value(external_status.get("version")),
+                )
                 return self._copy_status()
-
-            self._status.phase = DevicePhase.DISCOVERING
-            self._status.error = None
+            self._status = DeviceStatus(phase=DevicePhase.DISCOVERING)
             devices = await self.discover()
             selected_port, error = self._select_port(devices, request.serial_port)
             if error is not None:
@@ -181,7 +184,22 @@ class DaemonManager:
 
         if process is not None and owned_pid is not None and await self._still_owns(process, owned_pid):
             await self._request_sleep()
-            await self._terminate_recorded_process(process, owned_pid)
+            try:
+                await self._terminate_recorded_process(process, owned_pid)
+            except Exception as error:
+                self._logs.append("error", f"Owned Reachy daemon PID {owned_pid} could not be stopped: {error}")
+                async with self._lock:
+                    self._operation_task = None
+                    if self._process is process and self._owned_pid == owned_pid:
+                        self._set_error(
+                            DeviceError(
+                                code="daemon_stop_failed",
+                                phase=DevicePhase.STOPPING,
+                                message="The owned Reachy daemon could not be stopped.",
+                                detail=str(error),
+                            )
+                        )
+                        return self._copy_status()
 
         async with self._lock:
             self._process = None
@@ -231,6 +249,8 @@ class DaemonManager:
             daemon_status = await self._daemon_client.status()
         except Exception:
             async with self._lock:
+                if self._is_unowned_external_ready():
+                    self._status = DeviceStatus(phase=DevicePhase.OFFLINE)
                 return self._copy_status()
 
         async with self._lock:
@@ -242,6 +262,12 @@ class DaemonManager:
                 if state.lower() in {"running", "ready"}:
                     self._status.phase = DevicePhase.READY
                     self._status.error = None
+                elif self._is_unowned_external_ready():
+                    self._status = DeviceStatus(
+                        phase=DevicePhase.OFFLINE,
+                        daemon_state=state,
+                        daemon_version=version,
+                    )
             return self._copy_status()
 
     def logs_after(self, cursor: int) -> dict[str, int | list[dict[str, object]]]:
@@ -302,6 +328,28 @@ class DaemonManager:
                 self._status.error = None
             self._logs.append("info", "Reachy daemon is ready")
         except asyncio.CancelledError:
+            cancellation_phase = self._status.phase
+            cleanup_error: Exception | None = None
+            if process is not None and await self._still_owns(process, process.pid):
+                try:
+                    await asyncio.shield(self._terminate_recorded_process(process, process.pid))
+                except Exception as error:
+                    cleanup_error = error
+            async with self._lock:
+                if process is not None and self._process is process and process.poll() is not None:
+                    self._record_process_exit(process.pid, process.poll() or 0, expected=True)
+                self._set_error(
+                    DeviceError(
+                        code="startup_cancel_failed" if cleanup_error is not None else "startup_cancelled",
+                        phase=cancellation_phase,
+                        message=(
+                            "Startup was cancelled but the owned daemon could not be stopped."
+                            if cleanup_error is not None
+                            else "Reachy daemon startup was cancelled."
+                        ),
+                        detail=str(cleanup_error) if cleanup_error is not None else None,
+                    )
+                )
             raise
         except _DaemonExitedError as error:
             async with self._lock:
@@ -359,12 +407,15 @@ class DaemonManager:
         if not self._clawbody_health_url:
             return False
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(self._clawbody_health_url)
-                return response.is_success
-        except httpx.HTTPError as error:
+            response = await asyncio.wait_for(self._request_clawbody_health(), timeout=5.0)
+            return response.is_success
+        except (httpx.HTTPError, TimeoutError) as error:
             self._logs.append("warning", f"ClawBody health probe failed: {error}")
             return False
+
+    async def _request_clawbody_health(self) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            return await client.get(self._clawbody_health_url)
 
     async def _request_sleep(self) -> None:
         try:
@@ -385,8 +436,8 @@ class DaemonManager:
                 process.kill()
                 try:
                     await asyncio.wait_for(asyncio.to_thread(process.wait, 1.0), timeout=1.5)
-                except (TimeoutError, subprocess.TimeoutExpired):
-                    self._logs.append("warning", f"Owned Reachy daemon PID {pid} did not exit after kill")
+                except (TimeoutError, subprocess.TimeoutExpired) as error:
+                    raise TimeoutError(f"Owned Reachy daemon PID {pid} did not exit after kill") from error
 
     async def _still_owns(self, process: ManagedProcess, pid: int) -> bool:
         async with self._lock:
@@ -474,6 +525,9 @@ class DaemonManager:
             and self._process.poll() is None
         )
 
+    def _is_unowned_external_ready(self) -> bool:
+        return not self._status.daemon_owned and self._status.phase == DevicePhase.READY
+
     def _startup_process_is_live(self, process: ManagedProcess) -> bool:
         """Reconcile a child exit observed between startup await points."""
         if self._process is not process or self._owned_pid != process.pid:
@@ -538,6 +592,10 @@ def _normalize_ports(value: Iterable[str] | str | None) -> list[str]:
 
 def _string_value(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _daemon_is_ready(status: dict[str, Any]) -> bool:
+    return (_string_value(status.get("state")) or "").lower() in {"running", "ready"}
 
 
 def _startup_error_code(phase: DevicePhase) -> str:

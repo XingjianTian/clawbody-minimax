@@ -1,10 +1,12 @@
 import asyncio
 import subprocess
+import sys
 from collections.abc import Callable, Coroutine
 from functools import wraps
 from io import StringIO
+from types import ModuleType
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from reachy_mini_openclaw.host_bridge.log_store import LogStore
 from reachy_mini_openclaw.host_bridge.manager import DaemonManager
@@ -34,12 +36,16 @@ class FakeProcess:
         stdout: StringIO | None = None,
         wait_error: Exception | None = None,
         wait_returncode: int = 0,
+        terminate_error: Exception | None = None,
+        kill_error: Exception | None = None,
     ) -> None:
         self.pid = pid
         self.stdout = stdout
         self.returncode: int | None = None
         self.wait_error = wait_error
         self.wait_returncode = wait_returncode
+        self.terminate_error = terminate_error
+        self.kill_error = kill_error
         self.terminate_calls = 0
         self.kill_calls = 0
 
@@ -48,9 +54,13 @@ class FakeProcess:
 
     def terminate(self) -> None:
         self.terminate_calls += 1
+        if self.terminate_error is not None:
+            raise self.terminate_error
 
     def kill(self) -> None:
         self.kill_calls += 1
+        if self.kill_error is not None:
+            raise self.kill_error
         self.returncode = -9
 
     def wait(self, timeout: float | None = None) -> int:
@@ -94,6 +104,13 @@ def make_manager(
         logs=LogStore(),
         clawbody_health_url="",
     )
+    if daemon_client is None:
+        async def status_after_process_start() -> dict[str, str]:
+            if manager._process is None:
+                raise ConnectionError("daemon is not listening")
+            return {"state": "running", "version": "1.8.0"}
+
+        client.status.side_effect = status_after_process_start
     return manager, process_factory, client, child
 
 
@@ -126,6 +143,34 @@ async def test_discover_returns_only_reachy_serial_devices():
 
 
 @async_test
+async def test_default_discovery_uses_reachy_lite_usb_vid_and_pid():
+    find_serial_port = Mock(return_value=["COM7"])
+    reachy_module = ModuleType("reachy_mini")
+    daemon_module = ModuleType("reachy_mini.daemon")
+    utils_module = ModuleType("reachy_mini.daemon.utils")
+    utils_module.find_serial_port = find_serial_port
+
+    with patch.dict(
+        sys.modules,
+        {
+            "reachy_mini": reachy_module,
+            "reachy_mini.daemon": daemon_module,
+            "reachy_mini.daemon.utils": utils_module,
+        },
+    ):
+        manager = DaemonManager(
+            process_factory=Mock(),
+            daemon_client=daemon_client_ready(),
+            logs=LogStore(),
+            clawbody_health_url="",
+        )
+        devices = await manager.discover()
+
+    assert [device.port for device in devices] == ["COM7"]
+    find_serial_port.assert_called_once_with(wireless_version=False, vid="1a86", pid="55d3")
+
+
+@async_test
 async def test_two_concurrent_starts_create_one_process():
     manager, process_factory, _, _ = make_manager()
 
@@ -142,6 +187,8 @@ async def test_start_uses_internal_command_and_reports_each_phase():
     manager: DaemonManager
 
     async def record_status_phase() -> dict[str, str]:
+        if manager._process is None:
+            raise ConnectionError("daemon is not listening")
         observed_phases.append((await manager.status()).phase)
         return {"state": "starting"}
 
@@ -171,6 +218,7 @@ async def test_start_uses_internal_command_and_reports_each_phase():
     assert result.phase == DevicePhase.STARTING
     command = process_factory.call_args.args[0]
     kwargs = process_factory.call_args.kwargs
+    assert command[0] == sys.executable
     assert command[1:] == [
         "-m",
         "reachy_mini.daemon.app.main",
@@ -219,6 +267,7 @@ async def test_requested_port_must_exactly_match_discovery():
 @async_test
 async def test_stop_never_terminates_reused_external_daemon():
     manager, process_factory, daemon_client, _ = make_manager()
+    daemon_client.status.side_effect = None
     daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
 
     external = await manager.status()
@@ -232,10 +281,10 @@ async def test_stop_never_terminates_reused_external_daemon():
 
 
 @async_test
-async def test_start_reuses_a_detected_external_daemon_without_spawning():
+async def test_start_probes_and_reuses_an_external_daemon_without_spawning():
     manager, process_factory, daemon_client, _ = make_manager()
+    daemon_client.status.side_effect = None
     daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
-    await manager.status()
 
     result = await manager.start(StartRequest())
 
@@ -243,6 +292,76 @@ async def test_start_reuses_a_detected_external_daemon_without_spawning():
     assert result.daemon_owned is False
     assert result.daemon_state == "running"
     process_factory.assert_not_called()
+
+
+@async_test
+async def test_unreachable_external_daemon_clears_stale_ready_and_allows_start():
+    manager, process_factory, daemon_client, _ = make_manager()
+    daemon_client.status.side_effect = None
+    daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
+    assert (await manager.status()).phase == DevicePhase.READY
+
+    daemon_client.status.side_effect = [
+        ConnectionError("external daemon exited"),
+        ConnectionError("daemon still offline"),
+        {"state": "running", "version": "1.8.0"},
+    ]
+    unreachable = await manager.status()
+    started = await manager.start(StartRequest())
+
+    assert unreachable.phase == DevicePhase.OFFLINE
+    assert unreachable.daemon_state is None
+    assert unreachable.daemon_version is None
+    assert started.phase == DevicePhase.STARTING
+    assert process_factory.call_count == 1
+
+
+@async_test
+async def test_start_ignores_stale_external_ready_after_preflight_failure():
+    manager, process_factory, daemon_client, _ = make_manager()
+    daemon_client.status.side_effect = None
+    daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
+    assert (await manager.status()).phase == DevicePhase.READY
+
+    daemon_client.status.side_effect = [
+        ConnectionError("external daemon exited"),
+        {"state": "running", "version": "1.8.0"},
+    ]
+    started = await manager.start(StartRequest())
+
+    assert started.phase == DevicePhase.STARTING
+    assert process_factory.call_count == 1
+
+
+@async_test
+async def test_start_preflight_failure_clears_stale_external_metadata_on_discovery_error():
+    manager, process_factory, daemon_client, _ = make_manager(ports=[])
+    daemon_client.status.side_effect = None
+    daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
+    assert (await manager.status()).phase == DevicePhase.READY
+
+    daemon_client.status.side_effect = ConnectionError("external daemon exited")
+    result = await manager.start(StartRequest())
+
+    assert result.phase == DevicePhase.ERROR
+    assert result.daemon_state is None
+    assert result.daemon_version is None
+    process_factory.assert_not_called()
+
+
+@async_test
+async def test_non_running_external_response_clears_stale_ready():
+    manager, _, daemon_client, _ = make_manager()
+    daemon_client.status.side_effect = None
+    daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
+    assert (await manager.status()).phase == DevicePhase.READY
+
+    daemon_client.status.return_value = {"state": "stopped", "version": "1.8.0"}
+    stopped = await manager.status()
+
+    assert stopped.phase == DevicePhase.OFFLINE
+    assert stopped.daemon_state == "stopped"
+    assert stopped.daemon_version == "1.8.0"
 
 
 @async_test
@@ -273,6 +392,104 @@ async def test_stop_kills_only_owned_process_when_terminate_times_out():
     assert child.terminate_calls == 1
     assert child.kill_calls == 1
     assert result.phase == DevicePhase.OFFLINE
+
+
+@async_test
+async def test_stop_preserves_ownership_when_terminate_fails():
+    child = FakeProcess(terminate_error=OSError("access denied"))
+    manager, _, _, child = make_manager(process=child)
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+
+    result = await manager.stop()
+
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "daemon_stop_failed"
+    assert result.daemon_owned is True
+    assert result.daemon_pid == child.pid
+    assert child.terminate_calls == 1
+    assert child.kill_calls == 0
+
+
+@async_test
+async def test_stop_preserves_ownership_when_wait_fails():
+    child = FakeProcess(wait_error=OSError("wait failed"))
+    manager, _, _, child = make_manager(process=child)
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+
+    result = await manager.stop()
+
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "daemon_stop_failed"
+    assert result.daemon_owned is True
+    assert result.daemon_pid == child.pid
+    assert child.terminate_calls == 1
+    assert child.kill_calls == 0
+
+
+@async_test
+async def test_stop_preserves_ownership_when_kill_fails():
+    child = FakeProcess(
+        wait_error=subprocess.TimeoutExpired(cmd="reachy-daemon", timeout=5),
+        kill_error=OSError("kill failed"),
+    )
+    manager, _, _, child = make_manager(process=child)
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+
+    result = await manager.stop()
+
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "daemon_stop_failed"
+    assert result.daemon_owned is True
+    assert result.daemon_pid == child.pid
+    assert child.terminate_calls == 1
+    assert child.kill_calls == 1
+
+
+@async_test
+async def test_connecting_stage_cancellation_terminates_owned_process():
+    connecting = asyncio.Event()
+    never_ready = asyncio.Event()
+    status_calls = 0
+    daemon_client = daemon_client_ready()
+
+    async def block_while_connecting() -> dict[str, str]:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            raise ConnectionError("daemon is not listening")
+        connecting.set()
+        await never_ready.wait()
+        return {"state": "running"}
+
+    daemon_client.status.side_effect = block_while_connecting
+    manager, _, _, child = make_manager(daemon_client=daemon_client)
+
+    await manager.start(StartRequest())
+    await connecting.wait()
+    operation_task = manager._operation_task
+    assert operation_task is not None
+    operation_task.cancel()
+    try:
+        await operation_task
+    except asyncio.CancelledError:
+        pass
+
+    daemon_client.status.side_effect = ConnectionError("daemon stopped")
+    result = await manager.status()
+
+    assert child.terminate_calls == 1
+    assert child.kill_calls == 0
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "startup_cancelled"
+    assert result.daemon_owned is False
+    assert result.daemon_pid is None
 
 
 @async_test
@@ -353,3 +570,34 @@ async def test_status_reconciles_an_owned_process_that_has_exited():
     assert result.error.code == "daemon_exited"
     assert result.daemon_owned is False
     assert result.daemon_pid is None
+
+
+@async_test
+async def test_clawbody_health_probe_has_five_second_wall_clock_deadline():
+    manager, _, _, _ = make_manager()
+    manager._clawbody_health_url = "http://127.0.0.1:7860/health"
+    observed_timeouts: list[float] = []
+
+    class FakeHealthClient:
+        async def __aenter__(self):
+            raise AssertionError("health client context was entered outside the wall-clock deadline")
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, url: str):
+            return Mock(is_success=True)
+
+    async def expire_request(awaitable, *, timeout: float):
+        observed_timeouts.append(timeout)
+        awaitable.close()
+        raise TimeoutError("wall-clock deadline")
+
+    with (
+        patch("reachy_mini_openclaw.host_bridge.manager.httpx.AsyncClient", return_value=FakeHealthClient()),
+        patch("reachy_mini_openclaw.host_bridge.manager.asyncio.wait_for", side_effect=expire_request),
+    ):
+        reachable = await manager._probe_clawbody_health()
+
+    assert reachable is False
+    assert observed_timeouts == [5.0]
