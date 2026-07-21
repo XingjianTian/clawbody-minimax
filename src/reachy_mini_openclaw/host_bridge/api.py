@@ -206,7 +206,13 @@ def _default_manager() -> DaemonManager:
     )
 
 
-app = create_app(_default_manager())
+def _create_default_app() -> FastAPI:
+    """Load scheduled-login configuration before constructing the default manager."""
+    _load_working_directory_env()
+    return create_app(_default_manager())
+
+
+app = _create_default_app()
 
 
 def main() -> None:

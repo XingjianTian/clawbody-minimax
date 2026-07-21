@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -432,3 +433,52 @@ def test_main_keeps_real_environment_api_key_over_working_directory_dotenv(
     host_bridge_api.main()
 
     assert host_bridge_api.os.environ["HOST_BRIDGE_API_KEY"] == API_KEY
+
+
+def test_create_default_app_loads_daemon_and_clawbody_urls_from_working_directory_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    (tmp_path / ".env").write_text(
+        "HOST_BRIDGE_DAEMON_URL=http://127.0.0.1:8100\n"
+        "HOST_BRIDGE_CLAWBODY_HEALTH_URL=http://127.0.0.1:8790/health\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOST_BRIDGE_DAEMON_URL", raising=False)
+    monkeypatch.delenv("HOST_BRIDGE_CLAWBODY_HEALTH_URL", raising=False)
+    managers: list[DaemonManager] = []
+    sentinel = object()
+    monkeypatch.setattr(host_bridge_api, "create_app", lambda manager: managers.append(manager) or sentinel)
+
+    assert host_bridge_api._create_default_app() is sentinel
+    manager = managers[0]
+    try:
+        assert str(manager._daemon_client._client.base_url) == "http://127.0.0.1:8100/"
+        assert manager._clawbody_health_url == "http://127.0.0.1:8790/health"
+    finally:
+        asyncio.run(manager._daemon_client.aclose())
+
+
+def test_create_default_app_keeps_environment_urls_over_working_directory_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    (tmp_path / ".env").write_text(
+        "HOST_BRIDGE_DAEMON_URL=http://127.0.0.1:8100\n"
+        "HOST_BRIDGE_CLAWBODY_HEALTH_URL=http://127.0.0.1:8790/health\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOST_BRIDGE_DAEMON_URL", "http://127.0.0.1:8200")
+    monkeypatch.setenv("HOST_BRIDGE_CLAWBODY_HEALTH_URL", "http://127.0.0.1:8890/health")
+    managers: list[DaemonManager] = []
+    monkeypatch.setattr(host_bridge_api, "create_app", lambda manager: managers.append(manager) or object())
+
+    host_bridge_api._create_default_app()
+    manager = managers[0]
+    try:
+        assert str(manager._daemon_client._client.base_url) == "http://127.0.0.1:8200/"
+        assert manager._clawbody_health_url == "http://127.0.0.1:8890/health"
+    finally:
+        asyncio.run(manager._daemon_client.aclose())
