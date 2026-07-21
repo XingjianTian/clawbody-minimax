@@ -20,3 +20,14 @@ def test_log_store_bounds_history_and_redacts_secrets():
     assert "secret-token" not in str(result)
     assert "sk-private" not in str(result)
     assert "[REDACTED]" in str(result)
+
+
+def test_log_store_append_return_cannot_mutate_stored_entry():
+    store = LogStore()
+    returned_entry = store.append("info", "original message")
+    stored_result = store.after(0)
+
+    returned_entry.id = 999
+    returned_entry.message = "changed message"
+
+    assert store.after(0) == stored_result

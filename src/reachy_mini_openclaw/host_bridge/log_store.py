@@ -40,7 +40,7 @@ class LogStore:
                 created_at=datetime.now(UTC).isoformat(),
             )
             self._items.append(entry)
-            return entry
+            return entry.model_copy()
 
     def after(self, cursor: int) -> dict[str, int | list[dict[str, object]]]:
         """Return entries created after *cursor* and the current cursor."""
