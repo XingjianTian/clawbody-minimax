@@ -77,9 +77,9 @@ RUN pip install --upgrade pip \
         tornado \
         zeroconf
 
-EXPOSE 7860
+EXPOSE 7862
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860', timeout=3)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7862/health', timeout=3)"
 
-CMD ["clawbody", "--gradio", "--robot-host", "host.docker.internal", "--robot-port", "8000", "--no-openclaw", "--no-camera", "--no-face-tracking"]
+CMD ["clawbody-service"]

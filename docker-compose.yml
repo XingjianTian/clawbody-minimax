@@ -12,13 +12,15 @@ services:
       ENABLE_LLM_TOOLS: "false"
       ENABLE_AUTO_MOTION: "true"
       ROBOT_IDENTITY_FILE: /app/robot_identity/AGENTS.md
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: "7862"
     volumes:
       - type: bind
         source: ./robot_identity
         target: /app/robot_identity
         read_only: true
     ports:
-      - "7860:7860"
+      - "127.0.0.1:7862:7862"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

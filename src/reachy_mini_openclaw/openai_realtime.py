@@ -23,7 +23,8 @@ import re
 import struct
 import time
 import wave
-from typing import Any, Final, Optional, Tuple
+from collections.abc import Awaitable, Callable
+from typing import Any, Final
 
 import httpx
 import numpy as np
@@ -132,7 +133,7 @@ class VoiceHandler(AsyncStreamHandler):
     def __init__(
         self,
         deps: ToolDependencies,
-        openclaw_bridge: Optional[Any] = None,
+        openclaw_bridge: Any | None = None,
         gradio_mode: bool = False,
     ):
         super().__init__(
@@ -146,12 +147,12 @@ class VoiceHandler(AsyncStreamHandler):
         self.gradio_mode = gradio_mode
 
         # API clients (initialised in start_up)
-        self._client: Optional[AsyncOpenAI] = None
-        self._http: Optional[httpx.AsyncClient] = None
+        self._client: AsyncOpenAI | None = None
+        self._http: httpx.AsyncClient | None = None
 
         # Output queue
         self.output_queue: asyncio.Queue[
-            Tuple[int, NDArray[np.int16]] | AdditionalOutputs
+            tuple[int, NDArray[np.int16]] | AdditionalOutputs
         ] = asyncio.Queue()
 
         # VAD state
@@ -164,10 +165,13 @@ class VoiceHandler(AsyncStreamHandler):
 
         # Conversation history for multi-turn dialogue (LLM context)
         self._conversation_history: list[dict] = []
-        self._openclaw_agent_context: Optional[str] = None
+        self._openclaw_agent_context: str | None = None
 
         # Display history for UI (list of {"role": ..., "content": ...})
         self.display_history: list[dict] = []
+        self.runtime_identity: str | None = None
+        self.response_orchestrator: Callable[[str, Callable[[str], Awaitable[str | None]]], Awaitable[str | None]] | None = None
+        self.runtime_event_sink: Callable[[str, str, str, str], None] | None = None
 
         # Lifecycle
         self._shutdown_requested = False
@@ -213,7 +217,7 @@ class VoiceHandler(AsyncStreamHandler):
         if self._http:
             await self._http.aclose()
 
-    async def receive(self, frame: Tuple[int, NDArray]) -> None:
+    async def receive(self, frame: tuple[int, NDArray]) -> None:
         """Receive one audio frame and run VAD."""
         if self._processing:
             return  # Drop incoming audio while generating a response
@@ -297,7 +301,7 @@ class VoiceHandler(AsyncStreamHandler):
             )
             asyncio.create_task(self._process_speech(buffered))
 
-    async def emit(self) -> Tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
+    async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
         """Yield the next output item (audio chunk or transcript)."""
         return await wait_for_item(self.output_queue)
 
@@ -345,7 +349,11 @@ class VoiceHandler(AsyncStreamHandler):
 
             # 2. LLM
             llm_start = time.perf_counter()
-            response_text = await self._get_llm_response(transcript)
+            response_text = (
+                await self.response_orchestrator(transcript, self._get_llm_response)
+                if self.response_orchestrator
+                else await self._get_llm_response(transcript)
+            )
             logger.info("Timing: LLM %.2fs", time.perf_counter() - llm_start)
             if not response_text:
                 return
@@ -383,7 +391,7 @@ class VoiceHandler(AsyncStreamHandler):
             self._processing = False
             self.deps.movement_manager.set_processing(False)
 
-    async def _transcribe(self, audio: NDArray[np.int16]) -> Optional[str]:
+    async def _transcribe(self, audio: NDArray[np.int16]) -> str | None:
         """Transcribe audio using Baidu ASR (Chinese/English speech recognition)."""
         try:
             from reachy_mini_openclaw.baidu_voice import BaiduVoiceClient
@@ -395,7 +403,7 @@ class VoiceHandler(AsyncStreamHandler):
             logger.error("Baidu ASR failed: %s", e)
             return None
 
-    async def _get_llm_response(self, user_text: str) -> Optional[str]:
+    async def _get_llm_response(self, user_text: str) -> str | None:
         """Get a response from MiniMax M2.7, handling tool calls."""
         messages: list[dict] = [
             {"role": "system", "content": self._get_system_instructions()},
@@ -431,7 +439,7 @@ class VoiceHandler(AsyncStreamHandler):
             })
 
         try:
-            final_response: Optional[str] = None
+            final_response: str | None = None
 
             # Allow up to 5 rounds of tool use
             for _ in range(5):
@@ -547,9 +555,13 @@ class VoiceHandler(AsyncStreamHandler):
             audio_duration = len(samples) / OUTPUT_SAMPLE_RATE
             self._ignore_input_until = asyncio.get_event_loop().time() + audio_duration + 0.8
             self.last_activity_time = asyncio.get_event_loop().time()
+            if self.runtime_event_sink:
+                self.runtime_event_sink("tts", "complete", "百度 TTS 已就绪", "最终心宠回复已生成语音并发送到 Reachy 播放队列。")
 
         except Exception as e:
             logger.error("Baidu TTS error: %s", e)
+            if self.runtime_event_sink:
+                self.runtime_event_sink("tts", "error", "百度 TTS 失败", str(e))
 
     # ------------------------------------------------------------------
     # System prompt
@@ -572,12 +584,15 @@ class VoiceHandler(AsyncStreamHandler):
 
     def _get_system_instructions(self) -> str:
         """Reload the local identity and compose instructions for one LLM request."""
-        return build_robot_system_instructions(
+        base_instructions = build_robot_system_instructions(
             config.ROBOT_IDENTITY_FILE,
             FALLBACK_IDENTITY,
             ROBOT_BODY_INSTRUCTIONS,
             supplemental_context=self._openclaw_agent_context,
         )
+        if self.runtime_identity:
+            return f"{base_instructions}\n\n## 当前心宠个性配置\n{self.runtime_identity.strip()}"
+        return base_instructions
 
     # ------------------------------------------------------------------
     # OpenClaw tool handler

@@ -577,12 +577,25 @@ class ClawBodyCore:
             
     async def _push_audio_realtime(self, audio_data: Any, sample_rate: int) -> None:
         """Stream audio in small chunks so WebRTC can timestamp and encode it."""
+        import numpy as np
+
+        output_channels = max(1, int(self.robot.media.get_output_channels()))
+        if audio_data.ndim == 1 and output_channels > 1:
+            audio_data = np.repeat(audio_data[:, None], output_channels, axis=1)
+        elif audio_data.ndim == 2 and audio_data.shape[1] == 1 and output_channels > 1:
+            audio_data = np.repeat(audio_data, output_channels, axis=1)
+
         chunk_frames = max(1, int(sample_rate * 0.02))
+        pushed_frames = 0
         for start in range(0, len(audio_data), chunk_frames):
             if self._should_stop():
                 break
-            self.robot.media.push_audio_sample(audio_data[start : start + chunk_frames])
-            await asyncio.sleep(0.01)
+            chunk = audio_data[start : start + chunk_frames]
+            self.robot.media.push_audio_sample(chunk)
+            pushed_frames += len(chunk)
+
+        if pushed_frames:
+            await asyncio.sleep(pushed_frames / sample_rate)
 
     async def _play_audio_via_daemon(self, audio_data: Any, sample_rate: int) -> None:
         """Upload a temporary WAV and let Reachy Control play it locally."""

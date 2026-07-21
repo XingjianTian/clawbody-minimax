@@ -52,6 +52,8 @@ dependencies = [
 
     # Gradio UI
     "gradio>=4.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
 
     # Environment
     "python-dotenv",
@@ -97,6 +99,7 @@ dev = [
 
 [project.scripts]
 clawbody = "reachy_mini_openclaw.main:main"
+clawbody-service = "reachy_mini_openclaw.service_api:main"
 
 [project.entry-points."reachy_mini_apps"]
 clawbody = "reachy_mini_openclaw.main:ClawBodyApp"
