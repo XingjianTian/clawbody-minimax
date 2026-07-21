@@ -5,12 +5,18 @@ from reachy_mini_openclaw.two_layer_demo import EventStore, TwoLayerDemoOrchestr
 
 def test_negative_emotion_detector_matches_the_demo_sentence():
     neutral = detect_negative_emotion("今天完成了作业，感觉还不错")
-    negative = detect_negative_emotion("我今天心情不好，不想吃饭了")
+    medium = detect_negative_emotion("我今天心情不好，不想吃饭了")
+    high = detect_negative_emotion("我不想活了，想结束这一切")
 
     assert neutral.triggered is False
-    assert negative.triggered is True
-    assert "心情不好" in negative.matches
-    assert "不想吃饭" in negative.matches
+    assert neutral.level == "LOW"
+    assert medium.triggered is True
+    assert medium.level == "MEDIUM"
+    assert "心情不好" in medium.matches
+    assert "不想吃饭" in medium.matches
+    assert high.triggered is True
+    assert high.level == "HIGH"
+    assert "不想活" in high.matches
 
 
 def test_negative_message_runs_professional_handoff_before_pet_relay():
@@ -34,6 +40,7 @@ def test_negative_message_runs_professional_handoff_before_pet_relay():
         assert "专业建议" in pet_inputs[0]
         result = events.after(0)
         assert [item["kind"] for item in result["items"]] == ["emotion", "handoff", "professional", "relay"]
+        assert all(item["risk_level"] == "MEDIUM" for item in result["items"])
         assert result["cursor"] == 4
 
     asyncio.run(scenario())

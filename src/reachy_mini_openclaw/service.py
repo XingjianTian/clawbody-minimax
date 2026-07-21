@@ -8,7 +8,10 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from reachy_mini_openclaw.two_layer_demo import EventStore, ProfessionalResponder, TwoLayerDemoOrchestrator
+from reachy_mini_openclaw.two_layer_demo import EventStore, ProfessionalResponder, TwoLayerDemoOrchestrator, detect_negative_emotion
+
+
+RISK_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 
 
 class TranscriptStore:
@@ -22,12 +25,13 @@ class TranscriptStore:
         self._items.clear()
         self._cursor = 0
 
-    def append(self, role: str, content: str) -> dict[str, Any]:
+    def append(self, role: str, content: str, risk_level: str = "LOW") -> dict[str, Any]:
         self._cursor += 1
         item = {
             "id": self._cursor,
             "role": role,
             "content": content,
+            "risk_level": risk_level,
             "created_at": datetime.now(UTC).isoformat(),
         }
         self._items.append(item)
@@ -62,6 +66,8 @@ class ClawBodyService:
         self._error: str | None = None
         self._stop_requested = False
         self._seen_display_items = 0
+        self._last_message_risk = "LOW"
+        self._session_risk_level = "LOW"
         self.transcript = TranscriptStore(limit=100)
 
     @property
@@ -78,6 +84,8 @@ class ClawBodyService:
         self.transcript.clear()
         self.events.clear()
         self._seen_display_items = 0
+        self._last_message_risk = "LOW"
+        self._session_risk_level = "LOW"
         self._student_id = student_id
         self._state = "starting"
         self._error = None
@@ -167,6 +175,8 @@ class ClawBodyService:
         self._stop_requested = False
         self.transcript.clear()
         self.events.clear()
+        self._last_message_risk = "LOW"
+        self._session_risk_level = "LOW"
         return self.status()
 
     def _sync_transcript(self) -> None:
@@ -174,7 +184,12 @@ class ClawBodyService:
             return
         history = list(getattr(self.core.handler, "display_history", []))
         for item in history[self._seen_display_items :]:
-            self.transcript.append(item.get("role", "assistant"), item.get("content", ""))
+            role = item.get("role", "assistant")
+            if role == "user":
+                self._last_message_risk = detect_negative_emotion(item.get("content", "")).level
+                if RISK_RANK[self._last_message_risk] > RISK_RANK[self._session_risk_level]:
+                    self._session_risk_level = self._last_message_risk
+            self.transcript.append(role, item.get("content", ""), self._last_message_risk)
         self._seen_display_items = len(history)
 
     def transcript_after(self, cursor: int) -> dict[str, Any]:
@@ -185,13 +200,14 @@ class ClawBodyService:
         return self.events.after(cursor)
 
     def _append_runtime_event(self, kind: str, status: str, title: str, summary: str) -> None:
-        self.events.append(kind, status, title, summary)
+        self.events.append(kind, status, title, summary, self._session_risk_level)
 
     @staticmethod
     async def _fallback_professional_response(_message: str) -> str:
         return TwoLayerDemoOrchestrator.FALLBACK_ADVICE
 
     def status(self) -> dict[str, Any]:
+        self._sync_transcript()
         if self._task is not None and self._task.done() and self._state == "running":
             self._state = "idle"
         return {
@@ -199,6 +215,7 @@ class ClawBodyService:
             "student_id": self._student_id,
             "state": self._state,
             "error": self._error,
+            "risk_level": self._session_risk_level,
         }
 
     async def respond_text(self, message: str, identity: str) -> str:

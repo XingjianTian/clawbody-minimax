@@ -13,14 +13,16 @@ services:
       ENABLE_AUTO_MOTION: "true"
       ROBOT_IDENTITY_FILE: /app/robot_identity/AGENTS.md
       SERVICE_HOST: 0.0.0.0
-      SERVICE_PORT: "7862"
+      SERVICE_PORT: "7860"
     volumes:
       - type: bind
         source: ./robot_identity
         target: /app/robot_identity
         read_only: true
     ports:
-      - "127.0.0.1:7862:7862"
+      - "127.0.0.1:7860:7860"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    command:
+      - clawbody-service

@@ -1,6 +1,14 @@
 from fastapi.testclient import TestClient
 
-from reachy_mini_openclaw.service_api import app
+import inspect
+
+from reachy_mini_openclaw.service_api import app, main
+
+
+def test_service_defaults_to_single_container_port_7860():
+    source = inspect.getsource(main)
+    assert 'os.getenv("SERVICE_PORT", "7860")' in source
+    assert 'os.getenv("SERVICE_PORT", "7862")' not in source
 
 
 def test_private_endpoints_require_matching_service_key(monkeypatch):

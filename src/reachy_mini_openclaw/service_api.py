@@ -119,4 +119,4 @@ async def text_response(payload: TextInput) -> dict:
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(app, host=os.getenv("SERVICE_HOST", "127.0.0.1"), port=int(os.getenv("SERVICE_PORT", "7862")))
+    uvicorn.run(app, host=os.getenv("SERVICE_HOST", "127.0.0.1"), port=int(os.getenv("SERVICE_PORT", "7860")))

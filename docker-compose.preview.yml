@@ -1,20 +1,7 @@
 services:
-  clawbody-preview:
-    image: clawbody-minimax-clawbody
-    container_name: clawbody-preview
-    env_file:
-      - .env
+  clawbody:
     environment:
       PYTHONPATH: /app/src
-      ROBOT_HOST: host.docker.internal
-      ROBOT_PORT: "8000"
-      ENABLE_CAMERA: "false"
-      ENABLE_FACE_TRACKING: "false"
-      ENABLE_LLM_TOOLS: "false"
-      ENABLE_AUTO_MOTION: "true"
-      ROBOT_IDENTITY_FILE: /app/robot_identity/AGENTS.md
-      SERVICE_HOST: 0.0.0.0
-      SERVICE_PORT: "7862"
     volumes:
       - type: bind
         source: ./src
@@ -24,9 +11,3 @@ services:
         source: ./robot_identity
         target: /app/robot_identity
         read_only: true
-    ports:
-      - "127.0.0.1:7862:7862"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    command:
-      - clawbody-service

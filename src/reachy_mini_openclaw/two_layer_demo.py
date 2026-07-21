@@ -16,7 +16,7 @@ class DetectionResult:
     level: str
 
 
-NEGATIVE_EMOTION_TERMS = (
+MEDIUM_RISK_TERMS = (
     "心情不好",
     "不想吃饭",
     "没胃口",
@@ -28,10 +28,22 @@ NEGATIVE_EMOTION_TERMS = (
     "不想见人",
 )
 
+HIGH_RISK_TERMS = (
+    "不想活",
+    "结束这一切",
+    "自杀",
+    "伤害自己",
+    "活着没意思",
+    "死了算了",
+)
+
 
 def detect_negative_emotion(text: str) -> DetectionResult:
-    matches = tuple(term for term in NEGATIVE_EMOTION_TERMS if term in text)
-    return DetectionResult(triggered=bool(matches), matches=matches, level="attention" if matches else "normal")
+    high_matches = tuple(term for term in HIGH_RISK_TERMS if term in text)
+    if high_matches:
+        return DetectionResult(triggered=True, matches=high_matches, level="HIGH")
+    medium_matches = tuple(term for term in MEDIUM_RISK_TERMS if term in text)
+    return DetectionResult(triggered=bool(medium_matches), matches=medium_matches, level="MEDIUM" if medium_matches else "LOW")
 
 
 class EventStore:
@@ -45,7 +57,7 @@ class EventStore:
         self._items.clear()
         self._cursor = 0
 
-    def append(self, kind: str, status: str, title: str, summary: str) -> dict[str, Any]:
+    def append(self, kind: str, status: str, title: str, summary: str, risk_level: str = "LOW") -> dict[str, Any]:
         self._cursor += 1
         item = {
             "id": self._cursor,
@@ -53,6 +65,7 @@ class EventStore:
             "status": status,
             "title": title,
             "summary": summary,
+            "risk_level": risk_level,
             "created_at": datetime.now(UTC).isoformat(),
         }
         self._items.append(item)
@@ -81,8 +94,8 @@ class TwoLayerDemoOrchestrator:
             return await pet_responder(message)
 
         evidence = "、".join(detection.matches)
-        self.events.append("emotion", "complete", "检测到负面情绪", f"触发表达：{evidence}")
-        self.events.append("handoff", "complete", "转交小芯 AI", "已将学生原话交给演示专业咨询师智能体。")
+        self.events.append("emotion", "complete", f"检测为{'高' if detection.level == 'HIGH' else '中'}风险", f"触发表达：{evidence}", detection.level)
+        self.events.append("handoff", "complete", "转交小芯 AI", "已将学生原话交给演示专业咨询师智能体。", detection.level)
 
         try:
             advice = (await self._professional_responder(message)).strip() or self.FALLBACK_ADVICE
@@ -91,7 +104,7 @@ class TwoLayerDemoOrchestrator:
             advice = self.FALLBACK_ADVICE
             professional_status = "fallback"
 
-        self.events.append("professional", professional_status, "小芯专业建议", advice)
+        self.events.append("professional", professional_status, "小芯专业建议", advice, detection.level)
         relay_prompt = (
             "学生刚才说：\n"
             f"{message}\n\n"
@@ -101,7 +114,7 @@ class TwoLayerDemoOrchestrator:
         )
         response = await pet_responder(relay_prompt)
         if response:
-            self.events.append("relay", "complete", "心宠完成转述", response)
+            self.events.append("relay", "complete", "心宠完成转述", response, detection.level)
         else:
-            self.events.append("relay", "error", "心宠转述失败", "模型没有返回可播放的心宠回复。")
+            self.events.append("relay", "error", "心宠转述失败", "模型没有返回可播放的心宠回复。", detection.level)
         return response

@@ -1,6 +1,6 @@
 # 心宠 Docker 安装与使用指南
 
-本文适用于 Windows 10/11。请使用 UTF-8 编码打开本文档。完成后，对话网页地址为 `http://localhost:7860`，语音链路为：百度 ASR -> 通义千问 LLM -> 百度 TTS。
+本文适用于 Windows 10/11。请使用 UTF-8 编码打开本文档。完成后，ClawBody 会以无界面内部服务运行在 `http://127.0.0.1:7860`，统一从 Sentinel 的 `http://localhost:3000/pet-ai-management` 管理和发起对话。语音链路为：百度 ASR -> 通义千问 LLM -> 百度 TTS。
 
 ## 一、安装前准备
 
@@ -88,6 +88,8 @@ BAIDU_ASR_LANGUAGE=zh-CN
 
 Docker 容器会通过 `host.docker.internal:8000` 访问这个宿主机服务。控制软件没有启动时，网页可能能打开，但机器人无法动作或播放声音。
 
+ClawBody 自身不再提供 Gradio 网页；浏览器只访问 Sentinel，Sentinel 服务端再调用本机 `7860` 端口。
+
 ## 五、首次构建并启动
 
 确认 PowerShell 当前位于项目根目录，然后执行：
@@ -116,16 +118,16 @@ docker compose ps
 正常情况下应看到：
 
 ```text
-clawbody-reachy   Up ... (healthy)   0.0.0.0:7860->7860/tcp
+clawbody-reachy   Up ... (healthy)   127.0.0.1:7860->7860/tcp
 ```
 
-刚启动时可能暂时显示 `health: starting`，等待 30 至 60 秒后再次执行 `docker compose ps`。然后打开：
+刚启动时可能暂时显示 `health: starting`，等待 30 至 60 秒后再次执行 `docker compose ps`。可以检查内部服务健康状态：
 
 ```text
-http://localhost:7860
+http://127.0.0.1:7860/health
 ```
 
-进入网页后点击“开始对话”，面对机器人麦克风说话。正常链路应依次显示识别文字、模型回答，并播放语音和动作。
+然后打开 Sentinel 的 `http://localhost:3000/pet-ai-management`，进入“实时联调”并点击“开始对话”。面对机器人麦克风说话后，页面应依次显示识别文字、模型回答，并通过 Reachy 播放语音和动作。
 
 ## 七、以后如何启动和停止
 
@@ -213,9 +215,9 @@ docker compose logs --tail 100 clawbody
 docker compose restart clawbody
 ```
 
-### 网页打不开
+### Sentinel 显示“心宠设备服务暂不可用”
 
-确认 `docker compose ps` 显示 `healthy`，并检查 7860 端口：
+确认 `docker compose ps` 显示 `healthy`，并检查本机回环地址的 7860 端口：
 
 ```powershell
 Test-NetConnection localhost -Port 7860

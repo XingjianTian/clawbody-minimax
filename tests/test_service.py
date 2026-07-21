@@ -52,6 +52,22 @@ def test_transcript_store_limits_history_and_supports_cursor():
     assert result["cursor"] == 5
 
 
+def test_transcript_risk_is_inherited_by_pet_reply_and_escalates_session_status():
+    service = ClawBodyService(core_factory=lambda: FakeCore())
+    service.core = FakeCore()
+    service.core.handler.display_history = [
+        {"role": "user", "content": "我今天心情不好，不想吃饭了"},
+        {"role": "assistant", "content": "我们先慢慢喝一点水，好吗？"},
+        {"role": "user", "content": "我不想活了，想结束这一切"},
+        {"role": "assistant", "content": "我会陪着你，我们马上联系可信赖的大人。"},
+    ]
+
+    items = service.transcript_after(0)["items"]
+
+    assert [item["risk_level"] for item in items] == ["MEDIUM", "MEDIUM", "HIGH", "HIGH"]
+    assert service.status()["risk_level"] == "HIGH"
+
+
 def test_hardware_session_installs_two_layer_orchestration_and_exposes_events():
     async def professional(_message: str) -> str:
         return "专业建议"

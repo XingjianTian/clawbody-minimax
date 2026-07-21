@@ -105,7 +105,7 @@ The supported management UI is PsyTwin Sentinel. Start this project as a private
 clawbody-service
 ```
 
-Configure `SERVICE_HOST`, `SERVICE_PORT`, and `SERVICE_API_KEY` in `.env`, then set the matching `CLAWBODY_SERVICE_URL` and `CLAWBODY_SERVICE_KEY` in Sentinel. Keep port 7862 on localhost or a private container network.
+Configure `SERVICE_HOST`, `SERVICE_PORT`, and `SERVICE_API_KEY` in `.env`, then set the matching `CLAWBODY_SERVICE_URL` and `CLAWBODY_SERVICE_KEY` in Sentinel. The supported Docker runtime uses one headless container bound to `127.0.0.1:7860`.
 
 The authenticated internal API provides:
 
@@ -182,19 +182,20 @@ docker compose down
 
 ### Preview Local Changes
 
-Use the preview service while changing Python source. It mounts
-the local `src/` directory into the existing image, so it does not rebuild or
-download dependencies. It remains private and does not publish another web port.
+Use the preview override while changing Python source. It mounts the local
+`src/` directory into the same `clawbody-reachy` service, so it neither creates
+a second container nor publishes another port.
 
 ```powershell
-# Start the local-source preview once
-docker compose -f docker-compose.preview.yml up -d
+# Recreate the single service with local source mounted
+docker compose -f docker-compose.yml -f docker-compose.preview.yml up -d
 
-# After changing Python or UI files, restart in a few seconds without rebuilding
-docker compose -f docker-compose.preview.yml restart clawbody-preview
+# After changing Python files, restart the same service without rebuilding
+docker compose -f docker-compose.yml -f docker-compose.preview.yml restart clawbody
 
-# Stop the preview when it is no longer needed
-docker compose -f docker-compose.preview.yml down
+# Return to the image-only service
+docker compose -f docker-compose.yml -f docker-compose.preview.yml down
+docker compose up -d
 ```
 
 After the preview is approved, update the normal service once:
