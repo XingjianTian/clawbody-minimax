@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from reachy_mini_openclaw.host_bridge import api as host_bridge_api
-from reachy_mini_openclaw.host_bridge.daemon_client import DaemonRequestError
+from reachy_mini_openclaw.host_bridge.daemon_client import DaemonRequestError, ReachyDaemonClient
+from reachy_mini_openclaw.host_bridge.manager import DaemonManager
 from reachy_mini_openclaw.host_bridge.models import (
     DeviceAction,
+    DeviceError,
     DevicePhase,
     DeviceStatus,
     PoseRequest,
@@ -25,6 +28,8 @@ class FakeManager:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.failure: Exception | None = None
+        self.cleanup_failure: Exception | None = None
+        self.return_status = DeviceStatus(phase=DevicePhase.READY)
 
     async def discover(self) -> list[SerialDevice]:
         self.calls.append(("discover", None))
@@ -32,7 +37,7 @@ class FakeManager:
 
     async def status(self) -> DeviceStatus:
         self.calls.append(("status", None))
-        return DeviceStatus(phase=DevicePhase.READY)
+        return self.return_status
 
     async def start(self, request: StartRequest) -> DeviceStatus:
         self.calls.append(("start", request))
@@ -41,6 +46,11 @@ class FakeManager:
     async def stop(self) -> DeviceStatus:
         self.calls.append(("stop", None))
         return DeviceStatus()
+
+    async def aclose(self) -> None:
+        self.calls.append(("aclose", None))
+        if self.cleanup_failure is not None:
+            raise self.cleanup_failure
 
     async def restart(self, request: StartRequest) -> DeviceStatus:
         self.calls.append(("restart", request))
@@ -252,6 +262,28 @@ def test_operation_errors_are_mapped_without_leaking_details(
     assert "top-secret" not in response.text
 
 
+def test_returned_device_error_detail_is_redacted_without_mutating_manager_status(
+    client: TestClient,
+    manager: FakeManager,
+):
+    manager.return_status = DeviceStatus(
+        phase=DevicePhase.ERROR,
+        error=DeviceError(
+            code="daemon_start_failed",
+            phase=DevicePhase.STARTING,
+            message="The Reachy daemon could not be started.",
+            detail="password=top-secret",
+        ),
+    )
+
+    response = client.get("/v1/device/status", headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["error"]["detail"] == "password=[REDACTED]"
+    assert manager.return_status.error is not None
+    assert manager.return_status.error.detail == "password=top-secret"
+
+
 def test_insecure_api_key_refuses_application_startup(
     monkeypatch: pytest.MonkeyPatch,
     manager: FakeManager,
@@ -262,20 +294,98 @@ def test_insecure_api_key_refuses_application_startup(
             pass
 
 
-def test_application_shutdown_stops_only_through_manager(
+@pytest.mark.parametrize("configured_key", [None, ""])
+def test_missing_or_empty_api_key_refuses_application_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    manager: FakeManager,
+    configured_key: str | None,
+):
+    if configured_key is None:
+        monkeypatch.delenv("HOST_BRIDGE_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("HOST_BRIDGE_API_KEY", configured_key)
+
+    with pytest.raises(RuntimeError, match="HOST_BRIDGE_API_KEY"):
+        with TestClient(host_bridge_api.create_app(manager)):
+            pass
+
+
+def test_application_shutdown_closes_only_through_manager(
     monkeypatch: pytest.MonkeyPatch,
     manager: FakeManager,
 ):
     monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
     with TestClient(host_bridge_api.create_app(manager)):
         pass
-    assert manager.calls == [("stop", None)]
+    assert manager.calls == [("aclose", None)]
+
+
+def test_application_shutdown_reports_cleanup_failure_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    manager: FakeManager,
+):
+    monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
+    manager.cleanup_failure = RuntimeError("password=top-secret")
+
+    with pytest.raises(RuntimeError, match="Host Bridge shutdown cleanup failed") as raised:
+        with TestClient(host_bridge_api.create_app(manager)):
+            pass
+
+    assert "top-secret" not in str(raised.value)
+    assert manager.calls == [("aclose", None)]
+
+
+def test_application_shutdown_closes_underlying_http_transport(monkeypatch: pytest.MonkeyPatch):
+    class TrackingTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, request=request)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    transport = TrackingTransport()
+    daemon_client = ReachyDaemonClient(transport=transport)
+    manager = DaemonManager(
+        discover_ports=lambda: [],
+        daemon_client=daemon_client,
+        clawbody_health_url="",
+    )
+    monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
+
+    with TestClient(host_bridge_api.create_app(manager)):
+        pass
+
+    assert transport.closed is True
 
 
 def test_main_rejects_non_loopback_host(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
     monkeypatch.setenv("HOST_BRIDGE_HOST", "0.0.0.0")
     with pytest.raises(RuntimeError, match="127.0.0.1"):
+        host_bridge_api.main()
+
+
+@pytest.mark.parametrize(
+    ("configured_port", "message"),
+    [
+        ("not-a-port", "must be an integer"),
+        ("0", "must be between 1 and 65535"),
+        ("65536", "must be between 1 and 65535"),
+    ],
+)
+def test_main_rejects_invalid_or_out_of_range_port(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_port: str,
+    message: str,
+):
+    monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
+    monkeypatch.setenv("HOST_BRIDGE_HOST", "127.0.0.1")
+    monkeypatch.setenv("HOST_BRIDGE_PORT", configured_port)
+
+    with pytest.raises(RuntimeError, match=message):
         host_bridge_api.main()
 
 

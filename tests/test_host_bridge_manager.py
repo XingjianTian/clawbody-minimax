@@ -8,11 +8,14 @@ from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
+
 from reachy_mini_openclaw.host_bridge.log_store import LogStore
 from reachy_mini_openclaw.host_bridge.manager import DaemonManager
 from reachy_mini_openclaw.host_bridge.models import (
     DeviceAction,
     DevicePhase,
+    DeviceStatus,
     MediaStatus,
     PoseRequest,
     StartRequest,
@@ -752,6 +755,67 @@ async def test_restart_and_typed_controls_delegate_to_daemon_client():
     assert restarted.operation_id is not None
     await wait_for_phase(manager, DevicePhase.READY)
     await manager.stop()
+
+
+@async_test
+async def test_aclose_stops_before_closing_daemon_client():
+    events: list[str] = []
+    manager, _, daemon_client, _ = make_manager()
+
+    async def stop() -> DeviceStatus:
+        events.append("stop")
+        return DeviceStatus()
+
+    async def close_client() -> None:
+        events.append("close_client")
+
+    manager.stop = AsyncMock(side_effect=stop)
+    daemon_client.aclose.side_effect = close_client
+
+    await manager.aclose()
+
+    assert events == ["stop", "close_client"]
+
+
+@async_test
+async def test_aclose_closes_client_and_redacts_log_when_stop_fails():
+    manager, _, daemon_client, _ = make_manager()
+    manager.stop = AsyncMock(side_effect=RuntimeError("password=top-secret"))
+
+    with pytest.raises(RuntimeError, match="Host Bridge cleanup failed") as raised:
+        await manager.aclose()
+
+    daemon_client.aclose.assert_awaited_once_with()
+    logs = manager.logs_after(0)
+    assert "top-secret" not in str(logs)
+    assert "[REDACTED]" in str(logs)
+    assert "top-secret" not in str(raised.value)
+
+
+@async_test
+async def test_aclose_closes_client_before_propagating_stop_cancellation():
+    manager, _, daemon_client, _ = make_manager()
+    manager.stop = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.aclose()
+
+    daemon_client.aclose.assert_awaited_once_with()
+
+
+@async_test
+async def test_aclose_reports_redacted_daemon_client_close_failure():
+    manager, _, daemon_client, _ = make_manager()
+    manager.stop = AsyncMock(return_value=DeviceStatus())
+    daemon_client.aclose.side_effect = RuntimeError("token=top-secret")
+
+    with pytest.raises(RuntimeError, match="Host Bridge cleanup failed") as raised:
+        await manager.aclose()
+
+    logs = manager.logs_after(0)
+    assert "top-secret" not in str(logs)
+    assert "[REDACTED]" in str(logs)
+    assert "top-secret" not in str(raised.value)
 
 
 @async_test

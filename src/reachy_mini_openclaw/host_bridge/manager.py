@@ -201,6 +201,33 @@ class DaemonManager:
             self._status = DeviceStatus(phase=DevicePhase.OFFLINE)
             return self._copy_status()
 
+    async def aclose(self) -> None:
+        """Stop owned process state and always close the daemon HTTP client."""
+        cleanup_failed = False
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            status = await self.stop()
+            if status.error is not None and status.error.code != "daemon_not_owned":
+                cleanup_failed = True
+                detail = status.error.detail or status.error.message
+                self._logs.append("error", f"Host Bridge process cleanup failed: {detail}")
+        except asyncio.CancelledError as error:
+            cancelled = error
+        except Exception as error:
+            cleanup_failed = True
+            self._logs.append("error", f"Host Bridge process cleanup failed: {error}")
+
+        try:
+            await self._daemon_client.aclose()
+        except Exception as error:
+            cleanup_failed = True
+            self._logs.append("error", f"Host Bridge daemon client cleanup failed: {error}")
+
+        if cancelled is not None:
+            raise cancelled
+        if cleanup_failed:
+            raise RuntimeError("Host Bridge cleanup failed; see redacted logs")
+
     async def restart(self, request: StartRequest) -> DeviceStatus:
         """Stop the owned daemon, then begin a new owned operation."""
         stopped = await self.stop()

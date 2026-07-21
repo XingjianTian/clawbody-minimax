@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .daemon_client import DaemonRequestError, ReachyDaemonClient
+from .log_store import REDACTIONS
 from .manager import DaemonManager
 from .models import (
     ActionRequest,
@@ -87,6 +88,20 @@ async def _run_operation(operation: Awaitable[T]) -> T:
         raise _operation_error(error) from error
 
 
+def _external_status(status: DeviceStatus) -> DeviceStatus:
+    result = status.model_copy(deep=True)
+    if result.error is not None and result.error.detail is not None:
+        detail = result.error.detail
+        for pattern in REDACTIONS:
+            detail = pattern.sub(r"\1[REDACTED]", detail)
+        result.error.detail = detail
+    return result
+
+
+async def _run_status_operation(operation: Awaitable[DeviceStatus]) -> DeviceStatus:
+    return _external_status(await _run_operation(operation))
+
+
 def create_app(manager: DaemonManager) -> FastAPI:
     """Create the fixed Host Bridge route surface for a manager instance."""
 
@@ -97,10 +112,9 @@ def create_app(manager: DaemonManager) -> FastAPI:
             yield
         finally:
             try:
-                await manager.stop()
+                await manager.aclose()
             except Exception:
-                # Shutdown must remain safe and must not reflect process or credential details.
-                pass
+                raise RuntimeError("Host Bridge shutdown cleanup failed") from None
 
     application = FastAPI(
         title="PsyTwin ClawBody Host Bridge",
@@ -133,33 +147,33 @@ def create_app(manager: DaemonManager) -> FastAPI:
 
     @router.get("/status", response_model=DeviceStatus)
     async def status() -> DeviceStatus:
-        return await _run_operation(manager.status())
+        return await _run_status_operation(manager.status())
 
     @router.post("/start", response_model=DeviceStatus)
     async def start(request: _StrictStartRequest) -> DeviceStatus:
-        return await _run_operation(manager.start(request))
+        return await _run_status_operation(manager.start(request))
 
     @router.post("/stop", response_model=DeviceStatus)
     async def stop(
         _request: Annotated[_EmptyRequest | None, Body()] = None,
     ) -> DeviceStatus:
-        return await _run_operation(manager.stop())
+        return await _run_status_operation(manager.stop())
 
     @router.post("/restart", response_model=DeviceStatus)
     async def restart(request: _StrictStartRequest) -> DeviceStatus:
-        return await _run_operation(manager.restart(request))
+        return await _run_status_operation(manager.restart(request))
 
     @router.post("/action", response_model=DeviceStatus)
     async def action(request: _StrictActionRequest) -> DeviceStatus:
-        return await _run_operation(manager.perform(request.action))
+        return await _run_status_operation(manager.perform(request.action))
 
     @router.post("/pose", response_model=DeviceStatus)
     async def pose(request: _StrictPoseRequest) -> DeviceStatus:
-        return await _run_operation(manager.set_pose(request))
+        return await _run_status_operation(manager.set_pose(request))
 
     @router.post("/volume", response_model=DeviceStatus)
     async def volume(request: _StrictVolumeRequest) -> DeviceStatus:
-        return await _run_operation(manager.set_volume(request))
+        return await _run_status_operation(manager.set_volume(request))
 
     @router.get("/logs")
     async def logs(after: Annotated[int, Query(ge=0)] = 0) -> dict[str, int | list[dict[str, object]]]:
