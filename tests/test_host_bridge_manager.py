@@ -81,16 +81,26 @@ class FakeProcess:
         return self.returncode
 
 
+def daemon_snapshot(
+    *,
+    state: str = "running",
+    version: str = "1.8.0",
+    motor_mode: str = "enabled",
+    media: MediaStatus | None = None,
+) -> dict[str, object]:
+    return {
+        "daemon_status": {"state": state, "version": version},
+        "motor_mode": motor_mode,
+        "media": media or MediaStatus(camera="ready", microphone="ready", speaker="ready"),
+        "app_status": None,
+    }
+
+
 def daemon_client_ready() -> AsyncMock:
     client = AsyncMock()
     client.status.return_value = {"state": "running", "version": "1.8.0"}
     client.wait_until_ready.return_value = {"state": "running", "version": "1.8.0"}
-    client.snapshot.return_value = {
-        "daemon_status": {"state": "running", "version": "1.8.0"},
-        "motor_mode": "enabled",
-        "media": MediaStatus(camera="ready", microphone="ready", speaker="ready"),
-        "app_status": None,
-    }
+    client.snapshot.return_value = daemon_snapshot()
     client.perform.return_value = {"uuid": "00000000-0000-0000-0000-000000000001"}
     client.set_pose.return_value = {"uuid": "00000000-0000-0000-0000-000000000001"}
     client.set_volume.return_value = {"volume": 50}
@@ -114,6 +124,7 @@ def make_manager(
         clawbody_health_url="",
     )
     if daemon_client is None:
+
         async def status_after_process_start() -> dict[str, str]:
             if manager._process is None:
                 raise ConnectionError("daemon is not listening")
@@ -207,13 +218,9 @@ async def test_start_uses_internal_command_and_reports_each_phase():
         return {"state": "running", "version": "1.8.0"}
 
     async def record_loading_phase() -> dict[str, object]:
-        observed_phases.append((await manager.status()).phase)
-        return {
-            "daemon_status": {"state": "running", "version": "1.8.0"},
-            "motor_mode": "enabled",
-            "media": MediaStatus(),
-            "app_status": None,
-        }
+        if manager._status.phase == DevicePhase.LOADING_APPS:
+            observed_phases.append(manager._status.phase)
+        return daemon_snapshot(media=MediaStatus())
 
     client = daemon_client_ready()
     client.status.side_effect = record_status_phase
@@ -757,6 +764,210 @@ async def test_restart_and_typed_controls_delegate_to_daemon_client():
     assert restarted.operation_id is not None
     await wait_for_phase(manager, DevicePhase.READY)
     await manager.stop()
+
+
+@async_test
+async def test_sleep_returns_disabled_motor_mode_from_live_daemon():
+    manager, _, daemon_client, _ = make_manager()
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    snapshot_count = daemon_client.snapshot.await_count
+
+    async def sleep(action: DeviceAction) -> dict[str, str]:
+        assert action is DeviceAction.GOTO_SLEEP
+        daemon_client.snapshot.return_value = daemon_snapshot(motor_mode="disabled")
+        return {"uuid": "00000000-0000-0000-0000-000000000001"}
+
+    daemon_client.perform.side_effect = sleep
+
+    result = await manager.perform(DeviceAction.GOTO_SLEEP)
+
+    assert result.motor_mode == "disabled"
+    assert daemon_client.snapshot.await_count == snapshot_count + 1
+
+
+@async_test
+async def test_wake_returns_enabled_motor_mode_from_live_daemon():
+    manager, _, daemon_client, _ = make_manager()
+    daemon_client.snapshot.return_value = daemon_snapshot(motor_mode="disabled")
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    snapshot_count = daemon_client.snapshot.await_count
+
+    async def wake(action: DeviceAction) -> dict[str, str]:
+        assert action is DeviceAction.WAKE_UP
+        daemon_client.snapshot.return_value = daemon_snapshot(motor_mode="enabled")
+        return {"uuid": "00000000-0000-0000-0000-000000000001"}
+
+    daemon_client.perform.side_effect = wake
+
+    result = await manager.perform(DeviceAction.WAKE_UP)
+
+    assert result.motor_mode == "enabled"
+    assert daemon_client.snapshot.await_count == snapshot_count + 1
+
+
+@async_test
+async def test_set_volume_returns_current_media_after_optional_camera_failure():
+    manager, _, daemon_client, _ = make_manager()
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    snapshot_count = daemon_client.snapshot.await_count
+    request = VolumeRequest(target="speaker", volume=64)
+
+    async def set_volume(volume_request: VolumeRequest) -> dict[str, int]:
+        assert volume_request == request
+        daemon_client.snapshot.return_value = daemon_snapshot(
+            media=MediaStatus(
+                camera="unavailable",
+                microphone="ready",
+                speaker="ready",
+                input_volume=35,
+                output_volume=64,
+            )
+        )
+        return {"volume": 64}
+
+    daemon_client.set_volume.side_effect = set_volume
+
+    result = await manager.set_volume(request)
+
+    assert result.media == MediaStatus(
+        camera="unavailable",
+        microphone="ready",
+        speaker="ready",
+        input_volume=35,
+        output_volume=64,
+    )
+    assert daemon_client.snapshot.await_count == snapshot_count + 1
+
+
+@async_test
+async def test_set_pose_returns_current_daemon_snapshot():
+    manager, _, daemon_client, _ = make_manager()
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    snapshot_count = daemon_client.snapshot.await_count
+    pose = PoseRequest(head_yaw=12)
+
+    async def set_pose(pose_request: PoseRequest) -> dict[str, str]:
+        assert pose_request == pose
+        daemon_client.snapshot.return_value = daemon_snapshot(state="ready", version="1.8.1")
+        return {"uuid": "00000000-0000-0000-0000-000000000001"}
+
+    daemon_client.set_pose.side_effect = set_pose
+
+    result = await manager.set_pose(pose)
+
+    assert result.daemon_state == "ready"
+    assert result.daemon_version == "1.8.1"
+    assert daemon_client.snapshot.await_count == snapshot_count + 1
+
+
+@async_test
+async def test_live_snapshot_failure_preserves_owned_process_identity_and_reports_error():
+    manager, _, daemon_client, child = make_manager()
+    started = await manager.start(StartRequest(serial_port="COM5"))
+    await wait_for_phase(manager, DevicePhase.READY)
+    daemon_client.snapshot.side_effect = ConnectionError("daemon snapshot unavailable")
+
+    result = await manager.status()
+
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "daemon_status_failed"
+    assert result.error.phase == DevicePhase.READY
+    assert result.daemon_owned is True
+    assert result.daemon_pid == child.pid
+    assert result.serial_port == "COM5"
+    assert result.operation_id == started.operation_id
+    assert child.terminate_calls == 0
+    assert child.kill_calls == 0
+
+
+@async_test
+async def test_live_snapshot_recovers_only_its_transient_error():
+    manager, _, daemon_client, child = make_manager()
+    started = await manager.start(StartRequest(serial_port="COM5"))
+    await wait_for_phase(manager, DevicePhase.READY)
+    daemon_client.snapshot.side_effect = ConnectionError("temporary daemon snapshot failure")
+    failed = await manager.status()
+    assert failed.error is not None
+    assert failed.error.code == "daemon_status_failed"
+
+    daemon_client.snapshot.side_effect = None
+    daemon_client.snapshot.return_value = daemon_snapshot(
+        motor_mode="disabled",
+        media=MediaStatus(camera="unavailable", microphone="ready", speaker="ready"),
+    )
+
+    recovered = await manager.status()
+
+    assert recovered.phase == DevicePhase.READY
+    assert recovered.error is None
+    assert recovered.motor_mode == "disabled"
+    assert recovered.daemon_owned is True
+    assert recovered.daemon_pid == child.pid
+    assert recovered.serial_port == "COM5"
+    assert recovered.operation_id == started.operation_id
+
+
+@async_test
+async def test_live_snapshot_preserves_an_unrelated_owned_process_error():
+    child = FakeProcess(terminate_error=OSError("access denied"))
+    manager, _, daemon_client, _ = make_manager(process=child)
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    failed_stop = await manager.stop()
+    assert failed_stop.error is not None
+    assert failed_stop.error.code == "daemon_stop_failed"
+    snapshot_count = daemon_client.snapshot.await_count
+
+    result = await manager.status()
+
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "daemon_stop_failed"
+    assert result.daemon_owned is True
+    assert result.daemon_pid == child.pid
+    assert daemon_client.snapshot.await_count == snapshot_count + 1
+
+
+@async_test
+async def test_concurrent_live_snapshots_cannot_restore_an_older_motor_mode():
+    manager, _, daemon_client, _ = make_manager()
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    first_snapshot_started = asyncio.Event()
+    release_first_snapshot = asyncio.Event()
+    snapshot_calls = 0
+
+    async def changing_snapshot() -> dict[str, object]:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            first_snapshot_started.set()
+            await release_first_snapshot.wait()
+            motor_mode = "disabled"
+        else:
+            motor_mode = "enabled"
+        return daemon_snapshot(motor_mode=motor_mode)
+
+    daemon_client.snapshot.side_effect = changing_snapshot
+    first_status = asyncio.create_task(manager.status())
+    await asyncio.sleep(0)
+    assert first_snapshot_started.is_set()
+    second_status = asyncio.create_task(manager.status())
+    await asyncio.sleep(0)
+    release_first_snapshot.set()
+
+    first_result, second_result = await asyncio.gather(first_status, second_status)
+    assert first_result.motor_mode == "disabled"
+    assert second_result.motor_mode == "enabled"
+
+    daemon_client.snapshot.side_effect = ConnectionError("daemon snapshot unavailable")
+    failed_refresh = await manager.status()
+    assert failed_refresh.motor_mode == "enabled"
 
 
 @async_test

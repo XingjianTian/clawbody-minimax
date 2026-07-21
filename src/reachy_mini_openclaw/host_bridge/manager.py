@@ -96,6 +96,7 @@ class DaemonManager:
         self._logs = logs or LogStore()
         self._clawbody_health_url = clawbody_health_url
         self._lock = asyncio.Lock()
+        self._status_refresh_lock = asyncio.Lock()
         self._operation_task: asyncio.Task[None] | None = None
         self._stop_requested_operation_id: str | None = None
         self._external_operation_id: str | None = None
@@ -293,6 +294,7 @@ class DaemonManager:
 
     async def status(self) -> DeviceStatus:
         """Return owned state, or detect an already-running external daemon."""
+        refresh_owned_status = False
         async with self._lock:
             if self._process is not None and self._owned_pid is not None:
                 returncode = self._process.poll()
@@ -302,13 +304,19 @@ class DaemonManager:
                         returncode,
                         expected=self._status.phase == DevicePhase.STOPPING,
                     )
-                return self._copy_status()
+                    return self._copy_status()
+                if self._status.phase in ACTIVE_PHASES:
+                    return self._copy_status()
+                refresh_owned_status = True
             if self._status.phase in ACTIVE_PHASES:
                 return self._copy_status()
             observed_operation_id = self._status.operation_id
             observed_process = self._process
             observed_pid = self._owned_pid
             observed_phase = self._status.phase
+
+        if refresh_owned_status:
+            return await self._refresh_owned_status()
 
         try:
             daemon_status = await self._daemon_client.status()
@@ -348,6 +356,72 @@ class DaemonManager:
                         daemon_version=version,
                     )
             return self._copy_status()
+
+    async def _refresh_owned_status(self) -> DeviceStatus:
+        """Refresh daemon-observed fields without replacing manager-owned lifecycle state."""
+        async with self._status_refresh_lock:
+            async with self._lock:
+                process = self._process
+                owned_pid = self._owned_pid
+                if process is None or owned_pid is None:
+                    return self._copy_status()
+                returncode = process.poll()
+                if returncode is not None:
+                    self._record_process_exit(
+                        owned_pid,
+                        returncode,
+                        expected=self._status.phase == DevicePhase.STOPPING,
+                    )
+                    return self._copy_status()
+                if self._status.phase in ACTIVE_PHASES:
+                    return self._copy_status()
+                observed_operation_id = self._status.operation_id
+                observed_phase = self._status.phase
+
+            try:
+                snapshot = await self._daemon_client.snapshot()
+            except Exception as error:
+                async with self._lock:
+                    if not self._status_probe_is_current(
+                        observed_operation_id,
+                        process,
+                        owned_pid,
+                        observed_phase,
+                    ):
+                        return self._copy_status()
+                    returncode = process.poll()
+                    if returncode is not None:
+                        self._record_process_exit(owned_pid, returncode, expected=False)
+                        return self._copy_status()
+                    if self._status.error is None:
+                        self._logs.append("error", f"Owned Reachy daemon status refresh failed: {error}")
+                        self._set_error(
+                            DeviceError(
+                                code="daemon_status_failed",
+                                phase=observed_phase,
+                                message="The owned Reachy daemon status could not be refreshed.",
+                                detail=str(error),
+                            )
+                        )
+                    return self._copy_status()
+
+            async with self._lock:
+                if not self._status_probe_is_current(
+                    observed_operation_id,
+                    process,
+                    owned_pid,
+                    observed_phase,
+                ):
+                    return self._copy_status()
+                returncode = process.poll()
+                if returncode is not None:
+                    self._record_process_exit(owned_pid, returncode, expected=False)
+                    return self._copy_status()
+                self._apply_snapshot(snapshot)
+                if self._status.error is not None and self._status.error.code == "daemon_status_failed":
+                    self._status.phase = DevicePhase.READY
+                    self._status.error = None
+                return self._copy_status()
 
     def logs_after(self, cursor: int) -> dict[str, int | list[dict[str, object]]]:
         """Return redacted manager logs after a monotonic cursor."""
