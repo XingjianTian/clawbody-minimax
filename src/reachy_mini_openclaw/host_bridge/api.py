@@ -6,10 +6,12 @@ import hmac
 import os
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, TypeVar
 
 import httpx
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -54,6 +56,11 @@ class _EmptyRequest(BaseModel):
 
 def _api_key() -> str:
     return os.getenv("HOST_BRIDGE_API_KEY", "").strip()
+
+
+def _load_working_directory_env() -> None:
+    """Load the login task working directory's .env without overriding real environment values."""
+    load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
 
 
 def _validate_api_key_configuration() -> None:
@@ -204,6 +211,7 @@ app = create_app(_default_manager())
 
 def main() -> None:
     """Run the Host Bridge on its loopback-only interface."""
+    _load_working_directory_env()
     _validate_api_key_configuration()
     host = os.getenv("HOST_BRIDGE_HOST", DEFAULT_HOST).strip()
     if host != DEFAULT_HOST:

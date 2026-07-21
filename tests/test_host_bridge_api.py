@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -401,3 +402,33 @@ def test_main_runs_uvicorn_on_configured_loopback_port(monkeypatch: pytest.Monke
     monkeypatch.setattr(host_bridge_api.uvicorn, "run", run)
     host_bridge_api.main()
     assert calls == [(host_bridge_api.app, "127.0.0.1", 8791)]
+
+
+def test_main_loads_api_key_from_working_directory_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    calls: list[tuple[object, str, int]] = []
+    (tmp_path / ".env").write_text("HOST_BRIDGE_API_KEY=dotenv-host-bridge-key\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOST_BRIDGE_API_KEY", raising=False)
+    monkeypatch.setattr(host_bridge_api.uvicorn, "run", lambda app, *, host, port: calls.append((app, host, port)))
+
+    host_bridge_api.main()
+
+    assert calls == [(host_bridge_api.app, "127.0.0.1", 7861)]
+    assert host_bridge_api.os.environ["HOST_BRIDGE_API_KEY"] == "dotenv-host-bridge-key"
+
+
+def test_main_keeps_real_environment_api_key_over_working_directory_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    (tmp_path / ".env").write_text("HOST_BRIDGE_API_KEY=dotenv-host-bridge-key\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
+    monkeypatch.setattr(host_bridge_api.uvicorn, "run", lambda *_args, **_kwargs: None)
+
+    host_bridge_api.main()
+
+    assert host_bridge_api.os.environ["HOST_BRIDGE_API_KEY"] == API_KEY

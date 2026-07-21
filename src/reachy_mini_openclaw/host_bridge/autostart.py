@@ -79,7 +79,7 @@ def _task_xml(*, user_sid: str, executable: Path, working_directory: Path) -> ET
     ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}MultipleInstancesPolicy").text = "IgnoreNew"
     ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}DisallowStartIfOnBatteries").text = "false"
     ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}StopIfGoingOnBatteries").text = "false"
-    ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}AllowHardTerminate").text = "false"
+    ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}AllowHardTerminate").text = "true"
     ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}StartWhenAvailable").text = "true"
     ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}Hidden").text = "true"
     ET.SubElement(settings, f"{{{TASK_XML_NAMESPACE}}}Enabled").text = "true"
