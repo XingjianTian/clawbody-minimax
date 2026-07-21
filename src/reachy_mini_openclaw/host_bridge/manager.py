@@ -205,23 +205,55 @@ class DaemonManager:
         """Stop owned process state and always close the daemon HTTP client."""
         cleanup_failed = False
         cancelled: asyncio.CancelledError | None = None
-        try:
-            status = await self.stop()
-            if status.error is not None and status.error.code != "daemon_not_owned":
+        status: DeviceStatus | None = None
+        stop_task = asyncio.create_task(self.stop())
+        while True:
+            try:
+                status = await asyncio.shield(stop_task)
+                break
+            except asyncio.CancelledError as error:
+                cancelled = cancelled or error
+                if not stop_task.done():
+                    continue
+                try:
+                    status = stop_task.result()
+                except asyncio.CancelledError as stop_error:
+                    cancelled = cancelled or stop_error
+                except Exception as stop_error:
+                    cleanup_failed = True
+                    self._logs.append("error", f"Host Bridge process cleanup failed: {stop_error}")
+                break
+            except Exception as error:
                 cleanup_failed = True
-                detail = status.error.detail or status.error.message
-                self._logs.append("error", f"Host Bridge process cleanup failed: {detail}")
-        except asyncio.CancelledError as error:
-            cancelled = error
-        except Exception as error:
-            cleanup_failed = True
-            self._logs.append("error", f"Host Bridge process cleanup failed: {error}")
+                self._logs.append("error", f"Host Bridge process cleanup failed: {error}")
+                break
 
-        try:
-            await self._daemon_client.aclose()
-        except Exception as error:
+        if status is not None and status.error is not None and status.error.code != "daemon_not_owned":
             cleanup_failed = True
-            self._logs.append("error", f"Host Bridge daemon client cleanup failed: {error}")
+            detail = status.error.detail or status.error.message
+            self._logs.append("error", f"Host Bridge process cleanup failed: {detail}")
+
+        close_task = asyncio.create_task(self._daemon_client.aclose())
+        while True:
+            try:
+                await asyncio.shield(close_task)
+                break
+            except asyncio.CancelledError as error:
+                cancelled = cancelled or error
+                if not close_task.done():
+                    continue
+                try:
+                    close_task.result()
+                except asyncio.CancelledError as close_error:
+                    cancelled = cancelled or close_error
+                except Exception as close_error:
+                    cleanup_failed = True
+                    self._logs.append("error", f"Host Bridge daemon client cleanup failed: {close_error}")
+                break
+            except Exception as error:
+                cleanup_failed = True
+                self._logs.append("error", f"Host Bridge daemon client cleanup failed: {error}")
+                break
 
         if cancelled is not None:
             raise cancelled

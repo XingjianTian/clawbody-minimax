@@ -53,6 +53,7 @@ class FakeProcess:
         self.events = events
         self.terminate_calls = 0
         self.kill_calls = 0
+        self.wait_calls = 0
 
     def poll(self) -> int | None:
         return self.returncode
@@ -71,6 +72,7 @@ class FakeProcess:
         self.returncode = -9
 
     def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls += 1
         if self.wait_error is not None:
             error = self.wait_error
             self.wait_error = None
@@ -816,6 +818,48 @@ async def test_aclose_reports_redacted_daemon_client_close_failure():
     assert "top-secret" not in str(logs)
     assert "[REDACTED]" in str(logs)
     assert "top-secret" not in str(raised.value)
+
+
+@async_test
+async def test_aclose_cancellation_during_sleep_finishes_owned_process_cleanup():
+    events: list[str] = []
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+    child = FakeProcess(events=events)
+    manager, _, daemon_client, _ = make_manager(process=child)
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+
+    async def blocked_sleep(action: DeviceAction) -> dict[str, str]:
+        assert action is DeviceAction.GOTO_SLEEP
+        events.append("sleep")
+        sleep_started.set()
+        await release_sleep.wait()
+        return {"uuid": "00000000-0000-0000-0000-000000000001"}
+
+    async def close_client() -> None:
+        events.append("close_client")
+
+    daemon_client.perform.side_effect = blocked_sleep
+    daemon_client.aclose.side_effect = close_client
+    shutdown = asyncio.create_task(manager.aclose())
+    await sleep_started.wait()
+
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    release_sleep.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+
+    assert events == ["sleep", "terminate", "close_client"]
+    assert child.terminate_calls == 1
+    assert child.wait_calls == 1
+    assert child.returncode == 0
+    assert manager._process is None
+    assert manager._owned_pid is None
+    assert manager._status.daemon_owned is False
+    daemon_client.aclose.assert_awaited_once_with()
 
 
 @async_test
