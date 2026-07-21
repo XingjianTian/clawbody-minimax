@@ -327,6 +327,46 @@ async def test_stop_during_external_readiness_reports_not_owned_without_cancelli
 
 
 @async_test
+async def test_external_stop_rejection_preserves_readiness_failure_classification():
+    readiness_started = asyncio.Event()
+    release_readiness = asyncio.Event()
+    daemon_client = daemon_client_ready()
+    daemon_client.status.return_value = {"state": "starting", "version": "1.8.0"}
+
+    async def fail_external_readiness(*, timeout: float) -> dict[str, str]:
+        readiness_started.set()
+        await release_readiness.wait()
+        raise RuntimeError("external readiness failed")
+
+    daemon_client.wait_until_ready.side_effect = fail_external_readiness
+    manager, process_factory, _, _ = make_manager(daemon_client=daemon_client)
+
+    await manager.start(StartRequest())
+    await readiness_started.wait()
+    operation_task = manager._operation_task
+    assert operation_task is not None
+
+    stopped = await manager.stop()
+
+    assert stopped.phase == DevicePhase.ERROR
+    assert stopped.error is not None
+    assert stopped.error.code == "daemon_not_owned"
+    assert manager._status.phase == DevicePhase.HEALTHCHECKING
+    assert manager._status.error is None
+    assert operation_task.done() is False
+    process_factory.assert_not_called()
+    daemon_client.perform.assert_not_awaited()
+
+    release_readiness.set()
+    await operation_task
+    failed = await manager.status()
+    assert failed.phase == DevicePhase.ERROR
+    assert failed.error is not None
+    assert failed.error.code == "daemon_healthcheck_failed"
+    assert "external readiness failed" in (failed.error.detail or "")
+
+
+@async_test
 async def test_start_probes_and_reuses_an_external_daemon_without_spawning():
     manager, process_factory, daemon_client, _ = make_manager()
     daemon_client.status.side_effect = None

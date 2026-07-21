@@ -127,14 +127,14 @@ class DaemonManager:
             operation_task = self._operation_task
             operation_active = operation_task is not None and not operation_task.done()
             if operation_active and self._external_operation_id == self._status.operation_id:
-                self._set_error(
-                    DeviceError(
-                        code="daemon_not_owned",
-                        phase=DevicePhase.STOPPING,
-                        message="The running Reachy daemon is not owned by this Host Bridge.",
-                    )
+                rejected = self._copy_status()
+                rejected.phase = DevicePhase.ERROR
+                rejected.error = DeviceError(
+                    code="daemon_not_owned",
+                    phase=DevicePhase.STOPPING,
+                    message="The running Reachy daemon is not owned by this Host Bridge.",
                 )
-                return self._copy_status()
+                return rejected
             if operation_active:
                 self._stop_requested_operation_id = self._status.operation_id
             process = self._process
