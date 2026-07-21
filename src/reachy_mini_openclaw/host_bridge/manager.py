@@ -88,6 +88,7 @@ class DaemonManager:
         self._clawbody_health_url = clawbody_health_url
         self._lock = asyncio.Lock()
         self._operation_task: asyncio.Task[None] | None = None
+        self._stop_requested_operation_id: str | None = None
         self._process: ManagedProcess | None = None
         self._owned_pid: int | None = None
         self._status = DeviceStatus()
@@ -105,37 +106,15 @@ class DaemonManager:
                 return self._copy_status()
             if self._owns_live_process():
                 return self._copy_status()
-            try:
-                external_status = await asyncio.wait_for(self._daemon_client.status(), timeout=1.0)
-            except Exception:
-                external_status = None
-            if external_status is not None and _daemon_is_ready(external_status):
-                self._status = DeviceStatus(
-                    phase=DevicePhase.READY,
-                    daemon_state=_string_value(external_status.get("state")),
-                    daemon_version=_string_value(external_status.get("version")),
-                )
-                return self._copy_status()
-            self._status = DeviceStatus(phase=DevicePhase.DISCOVERING)
-            devices = await self.discover()
-            selected_port, error = self._select_port(devices, request.serial_port)
-            if error is not None:
-                self._set_error(error)
-                return self._copy_status()
-
             operation_id = str(uuid4())
             self._status = DeviceStatus(
                 phase=DevicePhase.STARTING,
                 operation_id=operation_id,
-                serial_port=selected_port,
             )
             started_status = self._copy_status()
             self._loop = asyncio.get_running_loop()
-            self._operation_task = asyncio.create_task(self._run_start(operation_id, selected_port))
+            self._operation_task = asyncio.create_task(self._run_start(operation_id, request.serial_port))
 
-        # Give the background operation one turn so concurrent callers observe
-        # the same operation and no second child can be created.
-        await asyncio.sleep(0)
         return started_status
 
     async def stop(self) -> DeviceStatus:
@@ -146,6 +125,8 @@ class DaemonManager:
         async with self._lock:
             operation_task = self._operation_task
             operation_active = operation_task is not None and not operation_task.done()
+            if operation_active:
+                self._stop_requested_operation_id = self._status.operation_id
             process = self._process
             owned_pid = self._owned_pid
             if process is None or owned_pid is None:
@@ -190,6 +171,7 @@ class DaemonManager:
                 self._logs.append("error", f"Owned Reachy daemon PID {owned_pid} could not be stopped: {error}")
                 async with self._lock:
                     self._operation_task = None
+                    self._stop_requested_operation_id = None
                     if self._process is process and self._owned_pid == owned_pid:
                         self._set_error(
                             DeviceError(
@@ -205,6 +187,7 @@ class DaemonManager:
             self._process = None
             self._owned_pid = None
             self._operation_task = None
+            self._stop_requested_operation_id = None
             self._status = DeviceStatus(phase=DevicePhase.OFFLINE)
             return self._copy_status()
 
@@ -244,16 +227,34 @@ class DaemonManager:
                 return self._copy_status()
             if self._status.phase in ACTIVE_PHASES:
                 return self._copy_status()
+            observed_operation_id = self._status.operation_id
+            observed_process = self._process
+            observed_pid = self._owned_pid
+            observed_phase = self._status.phase
 
         try:
             daemon_status = await self._daemon_client.status()
         except Exception:
             async with self._lock:
+                if not self._status_probe_is_current(
+                    observed_operation_id,
+                    observed_process,
+                    observed_pid,
+                    observed_phase,
+                ):
+                    return self._copy_status()
                 if self._is_unowned_external_ready():
                     self._status = DeviceStatus(phase=DevicePhase.OFFLINE)
                 return self._copy_status()
 
         async with self._lock:
+            if not self._status_probe_is_current(
+                observed_operation_id,
+                observed_process,
+                observed_pid,
+                observed_phase,
+            ):
+                return self._copy_status()
             state = _string_value(daemon_status.get("state"))
             version = _string_value(daemon_status.get("version"))
             if state is not None:
@@ -274,45 +275,79 @@ class DaemonManager:
         """Return redacted manager logs after a monotonic cursor."""
         return self._logs.after(cursor)
 
-    async def _run_start(self, operation_id: str, serial_port: str) -> None:
+    async def _run_start(self, operation_id: str, requested_port: str | None) -> None:
         process: ManagedProcess | None = None
         try:
-            command = [sys.executable, *(part.format(serial_port=serial_port) for part in DAEMON_COMMAND)]
-            process = self._process_factory(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=(
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                ),
-            )
+            try:
+                listening_status = await asyncio.wait_for(self._daemon_client.status(), timeout=1.0)
+            except Exception:
+                listening_status = None
+
+            if listening_status is None:
+                async with self._lock:
+                    if self._status.operation_id != operation_id:
+                        return
+                    self._status.phase = DevicePhase.DISCOVERING
+                devices = await self.discover()
+                serial_port, discovery_error = self._select_port(devices, requested_port)
+                if discovery_error is not None:
+                    async with self._lock:
+                        if self._status.operation_id == operation_id:
+                            self._set_error(discovery_error)
+                    return
+                async with self._lock:
+                    if self._status.operation_id != operation_id:
+                        return
+                    self._status.phase = DevicePhase.STARTING
+                    self._status.serial_port = serial_port
+
+                command = [sys.executable, *(part.format(serial_port=serial_port) for part in DAEMON_COMMAND)]
+                process = self._process_factory(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=(
+                        getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    ),
+                )
+                async with self._lock:
+                    if self._status.operation_id != operation_id:
+                        return
+                    self._process = process
+                    self._owned_pid = process.pid
+                    self._status.daemon_owned = True
+                    self._status.daemon_pid = process.pid
+                    self._status.phase = DevicePhase.CONNECTING
+                self._logs.append("info", f"Started owned Reachy daemon PID {process.pid} on {serial_port}")
+                self._start_output_thread(process)
+
+                listening_status = await self._wait_for_daemon_listening(process, timeout=15.0)
+            else:
+                async with self._lock:
+                    if self._status.operation_id != operation_id:
+                        return
+                    self._apply_daemon_status(listening_status)
+                    self._status.phase = DevicePhase.CONNECTING
+
             async with self._lock:
                 if self._status.operation_id != operation_id:
                     return
-                self._process = process
-                self._owned_pid = process.pid
-                self._status.daemon_owned = True
-                self._status.daemon_pid = process.pid
-                self._status.phase = DevicePhase.CONNECTING
-            self._logs.append("info", f"Started owned Reachy daemon PID {process.pid} on {serial_port}")
-            self._start_output_thread(process)
-
-            listening_status = await self._wait_for_daemon_listening(process, timeout=15.0)
-            async with self._lock:
-                if not self._startup_process_is_live(process):
+                if process is not None and not self._startup_process_is_live(process):
                     return
                 self._apply_daemon_status(listening_status)
                 self._status.phase = DevicePhase.HEALTHCHECKING
 
             ready_status = await self._daemon_client.wait_until_ready(timeout=45.0)
             async with self._lock:
-                if not self._startup_process_is_live(process):
+                if self._status.operation_id != operation_id:
+                    return
+                if process is not None and not self._startup_process_is_live(process):
                     return
                 self._apply_daemon_status(ready_status)
                 self._status.phase = DevicePhase.LOADING_APPS
@@ -320,7 +355,9 @@ class DaemonManager:
             snapshot = await self._daemon_client.snapshot()
             clawbody_reachable = await self._probe_clawbody_health()
             async with self._lock:
-                if not self._startup_process_is_live(process):
+                if self._status.operation_id != operation_id:
+                    return
+                if process is not None and not self._startup_process_is_live(process):
                     return
                 self._apply_snapshot(snapshot)
                 self._status.clawbody_reachable = clawbody_reachable
@@ -328,6 +365,8 @@ class DaemonManager:
                 self._status.error = None
             self._logs.append("info", "Reachy daemon is ready")
         except asyncio.CancelledError:
+            if self._stop_requested_operation_id == operation_id:
+                raise
             cancellation_phase = self._status.phase
             cleanup_error: Exception | None = None
             if process is not None and await self._still_owns(process, process.pid):
@@ -355,20 +394,32 @@ class DaemonManager:
             async with self._lock:
                 if self._process is process and self._owned_pid == process.pid:
                     self._record_process_exit(process.pid, error.returncode, expected=False)
-        except Exception as error:
+        except Exception as startup_error:
             phase = self._status.phase
-            self._logs.append("error", f"Reachy daemon startup failed during {phase.value}: {error}")
+            self._logs.append("error", f"Reachy daemon startup failed during {phase.value}: {startup_error}")
+            cleanup_error: Exception | None = None
             if process is not None and await self._still_owns(process, process.pid):
-                await self._terminate_recorded_process(process, process.pid)
+                try:
+                    await self._terminate_recorded_process(process, process.pid)
+                except Exception as cleanup_exception:
+                    cleanup_error = cleanup_exception
+                    self._logs.append(
+                        "error",
+                        "Owned Reachy daemon PID "
+                        f"{process.pid} could not be cleaned up after startup failure: {cleanup_exception}",
+                    )
             async with self._lock:
-                self._process = None
-                self._owned_pid = None
+                if process is not None and self._process is process and process.poll() is not None:
+                    self._record_process_exit(process.pid, process.poll() or 0, expected=True)
+                detail = str(startup_error)
+                if cleanup_error is not None:
+                    detail = f"{detail}; cleanup failed: {cleanup_error}"
                 self._set_error(
                     DeviceError(
                         code=_startup_error_code(phase),
                         phase=phase,
                         message="The Reachy daemon could not be started.",
-                        detail=str(error),
+                        detail=detail,
                     )
                 )
 
@@ -528,6 +579,20 @@ class DaemonManager:
     def _is_unowned_external_ready(self) -> bool:
         return not self._status.daemon_owned and self._status.phase == DevicePhase.READY
 
+    def _status_probe_is_current(
+        self,
+        operation_id: str | None,
+        process: ManagedProcess | None,
+        pid: int | None,
+        phase: DevicePhase,
+    ) -> bool:
+        return (
+            self._status.operation_id == operation_id
+            and self._process is process
+            and self._owned_pid == pid
+            and self._status.phase == phase
+        )
+
     def _startup_process_is_live(self, process: ManagedProcess) -> bool:
         """Reconcile a child exit observed between startup await points."""
         if self._process is not process or self._owned_pid != process.pid:
@@ -592,10 +657,6 @@ def _normalize_ports(value: Iterable[str] | str | None) -> list[str]:
 
 def _string_value(value: Any) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _daemon_is_ready(status: dict[str, Any]) -> bool:
-    return (_string_value(status.get("state")) or "").lower() in {"running", "ready"}
 
 
 def _startup_error_code(phase: DevicePhase) -> str:

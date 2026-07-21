@@ -38,6 +38,7 @@ class FakeProcess:
         wait_returncode: int = 0,
         terminate_error: Exception | None = None,
         kill_error: Exception | None = None,
+        events: list[str] | None = None,
     ) -> None:
         self.pid = pid
         self.stdout = stdout
@@ -46,6 +47,7 @@ class FakeProcess:
         self.wait_returncode = wait_returncode
         self.terminate_error = terminate_error
         self.kill_error = kill_error
+        self.events = events
         self.terminate_calls = 0
         self.kill_calls = 0
 
@@ -54,6 +56,8 @@ class FakeProcess:
 
     def terminate(self) -> None:
         self.terminate_calls += 1
+        if self.events is not None:
+            self.events.append("terminate")
         if self.terminate_error is not None:
             raise self.terminate_error
 
@@ -244,7 +248,9 @@ async def test_start_uses_internal_command_and_reports_each_phase():
 async def test_multiple_ports_require_explicit_selection():
     manager, process_factory, _, _ = make_manager(ports=["COM5", "COM8"])
 
-    status = await manager.start(StartRequest())
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.ERROR)
+    status = await manager.status()
 
     assert status.phase == DevicePhase.ERROR
     assert status.error is not None
@@ -256,7 +262,9 @@ async def test_multiple_ports_require_explicit_selection():
 async def test_requested_port_must_exactly_match_discovery():
     manager, process_factory, _, _ = make_manager(ports=["COM5"])
 
-    status = await manager.start(StartRequest(serial_port="COM8"))
+    await manager.start(StartRequest(serial_port="COM8"))
+    await wait_for_phase(manager, DevicePhase.ERROR)
+    status = await manager.status()
 
     assert status.phase == DevicePhase.ERROR
     assert status.error is not None
@@ -286,12 +294,89 @@ async def test_start_probes_and_reuses_an_external_daemon_without_spawning():
     daemon_client.status.side_effect = None
     daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
 
-    result = await manager.start(StartRequest())
+    started = await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
+    result = await manager.status()
 
+    assert started.operation_id is not None
     assert result.phase == DevicePhase.READY
     assert result.daemon_owned is False
     assert result.daemon_state == "running"
     process_factory.assert_not_called()
+
+
+@async_test
+async def test_starting_external_daemon_never_spawns_owned_process():
+    release_ready = asyncio.Event()
+    daemon_client = daemon_client_ready()
+    daemon_client.status.return_value = {"state": "starting", "version": "1.8.0"}
+
+    async def wait_for_external_ready(*, timeout: float) -> dict[str, str]:
+        await release_ready.wait()
+        return {"state": "running", "version": "1.8.0"}
+
+    daemon_client.wait_until_ready.side_effect = wait_for_external_ready
+    manager, process_factory, _, _ = make_manager(daemon_client=daemon_client)
+
+    started = await manager.start(StartRequest())
+    await asyncio.sleep(0)
+    try:
+        assert started.operation_id is not None
+        process_factory.assert_not_called()
+    finally:
+        release_ready.set()
+
+
+@async_test
+async def test_external_start_returns_operation_id_without_waiting_for_probe():
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+    daemon_client = daemon_client_ready()
+
+    async def delayed_external_status() -> dict[str, str]:
+        probe_started.set()
+        await release_probe.wait()
+        return {"state": "running", "version": "1.8.0"}
+
+    daemon_client.status.side_effect = delayed_external_status
+    manager, process_factory, _, _ = make_manager(daemon_client=daemon_client)
+
+    started = await asyncio.wait_for(manager.start(StartRequest()), timeout=0.05)
+
+    assert started.operation_id is not None
+    await probe_started.wait()
+    process_factory.assert_not_called()
+    release_probe.set()
+    await wait_for_phase(manager, DevicePhase.READY)
+
+
+@async_test
+async def test_owned_start_returns_operation_id_without_waiting_for_probe():
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+    daemon_client = daemon_client_ready()
+    probe_calls = 0
+
+    async def delayed_offline_status() -> dict[str, str]:
+        nonlocal probe_calls
+        probe_calls += 1
+        if probe_calls == 1:
+            probe_started.set()
+            await release_probe.wait()
+            raise ConnectionError("daemon offline")
+        return {"state": "running", "version": "1.8.0"}
+
+    daemon_client.status.side_effect = delayed_offline_status
+    manager, process_factory, _, _ = make_manager(daemon_client=daemon_client)
+
+    started = await asyncio.wait_for(manager.start(StartRequest()), timeout=0.05)
+
+    assert started.operation_id is not None
+    await probe_started.wait()
+    process_factory.assert_not_called()
+    release_probe.set()
+    await wait_for_phase(manager, DevicePhase.READY)
+    assert process_factory.call_count == 1
 
 
 @async_test
@@ -308,6 +393,7 @@ async def test_unreachable_external_daemon_clears_stale_ready_and_allows_start()
     ]
     unreachable = await manager.status()
     started = await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
 
     assert unreachable.phase == DevicePhase.OFFLINE
     assert unreachable.daemon_state is None
@@ -328,6 +414,7 @@ async def test_start_ignores_stale_external_ready_after_preflight_failure():
         {"state": "running", "version": "1.8.0"},
     ]
     started = await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
 
     assert started.phase == DevicePhase.STARTING
     assert process_factory.call_count == 1
@@ -341,7 +428,9 @@ async def test_start_preflight_failure_clears_stale_external_metadata_on_discove
     assert (await manager.status()).phase == DevicePhase.READY
 
     daemon_client.status.side_effect = ConnectionError("external daemon exited")
-    result = await manager.start(StartRequest())
+    await manager.start(StartRequest())
+    await wait_for_phase(manager, DevicePhase.ERROR)
+    result = await manager.status()
 
     assert result.phase == DevicePhase.ERROR
     assert result.daemon_state is None
@@ -493,6 +582,76 @@ async def test_connecting_stage_cancellation_terminates_owned_process():
 
 
 @async_test
+async def test_stop_during_connecting_requests_sleep_before_terminate():
+    events: list[str] = []
+    child = FakeProcess(events=events)
+    connecting = asyncio.Event()
+    never_ready = asyncio.Event()
+    status_calls = 0
+    daemon_client = daemon_client_ready()
+
+    async def block_while_connecting() -> dict[str, str]:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            raise ConnectionError("daemon offline")
+        connecting.set()
+        await never_ready.wait()
+        return {"state": "running"}
+
+    async def record_action(action: DeviceAction) -> dict[str, str]:
+        assert action == DeviceAction.GOTO_SLEEP
+        events.append("sleep")
+        return {"uuid": "00000000-0000-0000-0000-000000000001"}
+
+    daemon_client.status.side_effect = block_while_connecting
+    daemon_client.perform.side_effect = record_action
+    manager, _, _, _ = make_manager(process=child, daemon_client=daemon_client)
+
+    await manager.start(StartRequest())
+    await connecting.wait()
+    result = await manager.stop()
+
+    assert events == ["sleep", "terminate"]
+    assert result.phase == DevicePhase.OFFLINE
+    assert result.daemon_owned is False
+
+
+@async_test
+async def test_readiness_failure_preserves_owned_process_when_cleanup_is_denied():
+    child = FakeProcess(terminate_error=PermissionError("cannot terminate recorded PID"))
+    daemon_client = daemon_client_ready()
+    status_calls = 0
+
+    async def offline_then_listening() -> dict[str, str]:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            raise ConnectionError("daemon offline")
+        return {"state": "running", "version": "1.8.0"}
+
+    daemon_client.status.side_effect = offline_then_listening
+    daemon_client.wait_until_ready.side_effect = RuntimeError("readiness failed")
+    manager, _, _, _ = make_manager(process=child, daemon_client=daemon_client)
+
+    started = await manager.start(StartRequest())
+    operation_task = manager._operation_task
+    assert operation_task is not None
+    task_result = (await asyncio.gather(operation_task, return_exceptions=True))[0]
+    result = await manager.status()
+
+    assert task_result is None
+    assert result.operation_id == started.operation_id
+    assert result.phase == DevicePhase.ERROR
+    assert result.error is not None
+    assert result.error.code == "daemon_healthcheck_failed"
+    assert "readiness failed" in (result.error.detail or "")
+    assert "cannot terminate recorded PID" in (result.error.detail or "")
+    assert result.daemon_owned is True
+    assert result.daemon_pid == child.pid
+
+
+@async_test
 async def test_restart_and_typed_controls_delegate_to_daemon_client():
     manager, process_factory, daemon_client, first_child = make_manager()
     second_child = FakeProcess(pid=4322)
@@ -506,6 +665,7 @@ async def test_restart_and_typed_controls_delegate_to_daemon_client():
     await manager.set_pose(pose)
     await manager.set_volume(volume)
     restarted = await manager.restart(StartRequest())
+    await wait_for_phase(manager, DevicePhase.READY)
 
     daemon_client.perform.assert_any_await(DeviceAction.CENTER)
     daemon_client.set_pose.assert_awaited_once_with(pose)
@@ -537,8 +697,13 @@ async def test_process_output_is_classified_and_redacted():
 async def test_child_exit_during_startup_cannot_be_overwritten_by_ready():
     child = FakeProcess(stdout=StringIO("ERROR daemon crashed\n"), wait_returncode=7)
     daemon_client = daemon_client_ready()
+    status_calls = 0
 
     async def delayed_status() -> dict[str, str]:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            raise ConnectionError("daemon offline")
         await asyncio.sleep(0.01)
         return {"state": "starting"}
 
@@ -570,6 +735,46 @@ async def test_status_reconciles_an_owned_process_that_has_exited():
     assert result.error.code == "daemon_exited"
     assert result.daemon_owned is False
     assert result.daemon_pid is None
+
+
+@async_test
+async def test_stale_external_status_response_cannot_overwrite_new_owned_start():
+    stale_probe_started = asyncio.Event()
+    release_stale_probe = asyncio.Event()
+    connecting = asyncio.Event()
+    never_ready = asyncio.Event()
+    status_calls = 0
+    daemon_client = daemon_client_ready()
+
+    async def race_status() -> dict[str, str]:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            stale_probe_started.set()
+            await release_stale_probe.wait()
+            return {"state": "running", "version": "external"}
+        if status_calls == 2:
+            raise ConnectionError("no external daemon")
+        connecting.set()
+        await never_ready.wait()
+        return {"state": "running", "version": "owned"}
+
+    daemon_client.status.side_effect = race_status
+    manager, _, _, child = make_manager(daemon_client=daemon_client)
+
+    stale_status_task = asyncio.create_task(manager.status())
+    await stale_probe_started.wait()
+    started = await manager.start(StartRequest())
+    await connecting.wait()
+    release_stale_probe.set()
+    raced_status = await stale_status_task
+
+    assert raced_status.operation_id == started.operation_id
+    assert raced_status.phase == DevicePhase.CONNECTING
+    assert raced_status.daemon_owned is True
+    assert raced_status.daemon_pid == child.pid
+    assert raced_status.daemon_version != "external"
+    await manager.stop()
 
 
 @async_test
