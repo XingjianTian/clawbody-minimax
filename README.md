@@ -176,18 +176,25 @@ Starting a hardware session returns immediately with `state: "starting"`. Reachy
 
 For local Reachy daemon playback, ClawBody adapts mono Baidu TTS output to the device's reported output-channel count, queues contiguous timestamped chunks without per-chunk scheduler gaps, and then waits for the full clip duration. This prevents live `appsrc` underruns and truncated playback. No extra setting is required; restart the internal service after updating the code.
 
-### With Physical Robot (USB, diagnostics)
+### With Physical Robot (USB, read-only diagnostics)
 
-```bash
-# Terminal 1: Start the desktop app (or daemon)
-# The app must be running before starting ClawBody
+Keep Reachy Mini Control closed. Query the fixed Host Bridge task, its public health endpoint, and authenticated USB discovery without starting the daemon or moving the robot:
 
-# Terminal 2: Run ClawBody with USB connection
-clawbody --usb
-
-# The legacy Gradio UI remains available only for local diagnostics
-clawbody --usb --gradio
+```powershell
+.\.venv\Scripts\Activate.ps1
+clawbody-host status
+Invoke-RestMethod http://127.0.0.1:7861/health
+$hostBridgeKey = Read-Host "HOST_BRIDGE_API_KEY"
+Invoke-RestMethod http://127.0.0.1:7861/v1/device/discover -Headers @{"X-Host-Bridge-Key"=$hostBridgeKey}
 ```
+
+After Sentinel has started the device, this read-only request confirms that the Host Bridge-owned daemon is reachable; it does not move the robot:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/daemon/status
+```
+
+Start, stop, and control the physical device only from Sentinel's **心宠调试** workspace. Keep Reachy Mini Control closed, and do not run a separate daemon alongside the Host Bridge.
 
 ### With Simulator
 
