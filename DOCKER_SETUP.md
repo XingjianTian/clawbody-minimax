@@ -1,6 +1,6 @@
 # 心宠 Docker 安装与使用指南
 
-本文适用于 Windows 10/11。请使用 UTF-8 编码打开本文档。完成后，ClawBody 会以无界面内部服务运行在 `http://127.0.0.1:7860`，统一从 Sentinel 的 `http://localhost:3000/pet-ai-management` 管理和发起对话。语音链路为：百度 ASR -> 通义千问 LLM -> 百度 TTS。
+本文适用于 Windows 10/11。请使用 UTF-8 编码打开本文档。完成后，ClawBody 会以无界面内部服务运行在 `http://127.0.0.1:7860`，Windows Host Bridge 会在 `http://127.0.0.1:7861` 管理 USB 发现和 Reachy daemon，统一从 Sentinel 的 `http://localhost:3000/pet-ai-management` 管理和发起对话。语音链路为：百度 ASR -> 通义千问 LLM -> 百度 TTS。
 
 ## 一、安装前准备
 
@@ -8,7 +8,7 @@
 
 1. 已安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)。
 2. 已安装 Git，可在 PowerShell 执行 `git --version` 检查。
-3. 已安装心宠控制软件，机器人已接通电源并通过 USB 连接。
+3. 已安装 Python 3.11，机器人已接通电源并通过 USB 连接。
 4. 项目专用 `.env` 文件。该文件包含 API 密钥，应通过私密方式单独获取，不要上传到 Git。
 
 打开 Docker Desktop，等待左下角显示 Docker Engine 正常运行，再继续后面的操作。
@@ -74,21 +74,63 @@ BAIDU_TTS_SPD=5
 BAIDU_TTS_PIT=5
 BAIDU_TTS_VOL=12
 BAIDU_ASR_LANGUAGE=zh-CN
+
+SERVICE_HOST=127.0.0.1
+SERVICE_PORT=7860
+SERVICE_API_KEY=另一个独立的长随机值
+
+HOST_BRIDGE_HOST=127.0.0.1
+HOST_BRIDGE_PORT=7861
+HOST_BRIDGE_API_KEY=与Sentinel服务端完全相同的长随机值
+HOST_BRIDGE_DAEMON_URL=http://127.0.0.1:8000
+HOST_BRIDGE_CLAWBODY_HEALTH_URL=http://127.0.0.1:7860/health
 ```
 
-不要把真实 API 密钥粘贴到本文档、Issue、聊天群或 Git 提交中。
+可以执行以下命令生成随机值，每次执行一次，分别填写 Host Bridge 与 ClawBody service 的密钥：
 
-## 四、启动机器人控制服务
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
-1. 接通机器人电源并按下开机键。
-2. 打开心宠控制软件。
-3. 选择 USB 设备并完成连接。
-4. 确认机器人状态为 Ready，电机、麦克风和扬声器均可用。
-5. 确认软件检测到本机守护服务 `localhost:8000`。
+Sentinel 服务端需要配置 `HOST_BRIDGE_URL=http://127.0.0.1:7861`，并使用与本项目 `.env` 完全相同的 `HOST_BRIDGE_API_KEY`。Host Bridge 在密钥为空或仍为示例占位值时会拒绝启动。不得把 Host Bridge 密钥放进 `NEXT_PUBLIC_*` 变量或浏览器代码。不要把任何真实 API 密钥粘贴到本文档、Issue、聊天群或 Git 提交中。
 
-Docker 容器会通过 `host.docker.internal:8000` 访问这个宿主机服务。控制软件没有启动时，网页可能能打开，但机器人无法动作或播放声音。
+## 四、安装 Windows Host Bridge
 
-ClawBody 自身不再提供 Gradio 网页；浏览器只访问 Sentinel，Sentinel 服务端再调用本机 `7860` 端口。
+第一次安装时，在项目根目录执行：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install "reachy-mini==1.8.0"
+python -m pip install -e ".[dev,mediapipe_vision]"
+clawbody-host install
+clawbody-host status
+clawbody-host restart
+```
+
+`install` 创建或更新当前用户登录时运行的固定任务 `PsyTwin ClawBody Host Bridge`；`status` 查看该任务；`restart` 结束并重新启动这一个任务。以后更新 `.env` 或 Host Bridge 代码后，执行 `clawbody-host restart` 使其生效。若确实不再需要自动启动，可执行：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+clawbody-host uninstall --yes
+```
+
+`uninstall --yes` 只删除上述固定任务，不卸载 Python 包，也不删除 `.env`。日常使用不要执行卸载。
+
+Host Bridge 只监听 `127.0.0.1:7861`，所有 `/v1/*` 请求必须携带 `X-Host-Bridge-Key`。启动设备时，它在宿主机启动并管理 `127.0.0.1:8000` 的 Reachy daemon；Docker 容器通过 `host.docker.internal:8000` 访问同一个 daemon。`7861` 不对局域网或 Docker 发布。
+
+**启动设备前必须彻底关闭 Reachy Mini Control**，否则它可能占用 USB 串口或 `8000` 端口。设备启动不需要 VPN，也不会访问 Hugging Face、GitHub、OpenAI 或任何应用目录；首次安装依赖以及后续阿里云/百度语音对话仍需要正常网络。
+
+可用以下只读请求确认服务和 USB 发现，不会启动 daemon 或让机器人动作：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:7861/health
+$hostBridgeKey = Read-Host "HOST_BRIDGE_API_KEY"
+Invoke-RestMethod http://127.0.0.1:7861/v1/device/discover -Headers @{"X-Host-Bridge-Key"=$hostBridgeKey}
+```
+
+ClawBody 自身不再提供 Gradio 网页；浏览器只访问 Sentinel，Sentinel 服务端分别调用本机 `7861` 的 Host Bridge 和 `7860` 的 ClawBody service。
 
 ## 五、首次构建并启动
 
@@ -127,7 +169,7 @@ clawbody-reachy   Up ... (healthy)   127.0.0.1:7860->7860/tcp
 http://127.0.0.1:7860/health
 ```
 
-然后打开 Sentinel 的 `http://localhost:3000/pet-ai-management`，进入“实时联调”并点击“开始对话”。面对机器人麦克风说话后，页面应依次显示识别文字、模型回答，并通过 Reachy 播放语音和动作。
+然后执行日常流程：**启动 Docker -> 打开 Sentinel -> 选择“心宠调试” -> 点击“启动设备”**。面对机器人麦克风说话后，页面应依次显示识别文字、模型回答，并通过 Reachy 播放语音和动作。Reachy Mini Control 必须保持关闭。
 
 ## 七、以后如何启动和停止
 
@@ -209,11 +251,45 @@ docker compose logs --tail 100 clawbody
 
 ### `Robot connection failed`
 
-先启动心宠控制软件，确认机器人 Ready 且 `localhost:8000` 可用，然后执行：
+先确认 Reachy Mini Control 已关闭、USB 线已连接，再检查 Host Bridge：
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
+clawbody-host status
+Test-NetConnection 127.0.0.1 -Port 7861
+Invoke-RestMethod http://127.0.0.1:7861/health
+```
+
+如果计划任务存在但 `7861` 不通，检查 `.env` 是否仍是占位密钥，然后执行 `clawbody-host restart`。Host Bridge 就绪后，在 Sentinel 的“心宠调试”重新点击“启动设备”，再执行：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/daemon/status
 docker compose restart clawbody
 ```
+
+如果宿主机 `8000` 正常但容器仍然连接失败，验证 Docker Desktop 到宿主机 daemon 的路径：
+
+```powershell
+docker compose exec clawbody python -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:8000/api/daemon/status', timeout=5).read().decode())"
+```
+
+该命令失败时，确认 Docker Desktop 已启动，并检查 Docker Desktop 的代理、防火墙或 `host.docker.internal` 配置；不要把 `HOST_BRIDGE_HOST` 改成 `0.0.0.0`。
+
+### Host Bridge 返回 `401`
+
+Sentinel 服务端与本项目 `.env` 的 `HOST_BRIDGE_API_KEY` 不一致。两边改成同一个长随机值后执行 `clawbody-host restart`，同时重启 Sentinel 服务。不要把密钥贴进浏览器控制台或 URL。
+
+### Host Bridge 找不到 USB，或显示多个串口
+
+关闭 Reachy Mini Control，重新插拔 USB，并在“心宠调试”刷新设备。没有设备时检查 Windows 设备管理器；存在多个匹配设备时，必须在 Sentinel 中明确选择正确的 `COM` 端口，Host Bridge 不会猜测。
+
+### `7861` 或 `8000` 端口已被占用
+
+```powershell
+Get-NetTCPConnection -LocalPort 7861,8000 -ErrorAction SilentlyContinue
+```
+
+`7861` 应由一个 Host Bridge 计划任务占用；`8000` 应由 Host Bridge 启动的一个 Reachy daemon 占用。关闭 Reachy Mini Control 和手动启动的重复进程，然后用 `clawbody-host restart` 重启固定任务。不要同时运行计划任务与前台 `clawbody-host-bridge`。
 
 ### Sentinel 显示“心宠设备服务暂不可用”
 

@@ -97,6 +97,61 @@ ROBOT_PORT=8000
 
 ## 🎮 Usage
 
+### Windows Host Bridge for Reachy Mini Lite
+
+On Windows 10/11, the Host Bridge replaces Reachy Mini Control for USB discovery and daemon lifecycle management. It listens only on `127.0.0.1:7861`, authenticates every `/v1/*` request with `X-Host-Bridge-Key`, and owns only the daemon process it starts. Reachy Mini Control must be closed before starting the device so the USB serial port and daemon port are not already in use.
+
+Create a Python 3.11 virtual environment named `.venv`, install this project and the supported Reachy Mini SDK, then copy the environment template:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install "reachy-mini==1.8.0"
+python -m pip install -e ".[dev,mediapipe_vision]"
+Copy-Item .env.example .env
+```
+
+Generate separate long random values for `HOST_BRIDGE_API_KEY` and `SERVICE_API_KEY`, put them only in the local `.env`, and never commit or share that file. The Host Bridge refuses to start when its key is empty or still equals the example placeholder.
+
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Keep these Host Bridge values on loopback. Sentinel must use `HOST_BRIDGE_URL=http://127.0.0.1:7861` and the same `HOST_BRIDGE_API_KEY`; the key stays on the Sentinel server and must never be exposed through a `NEXT_PUBLIC_*` variable or browser code.
+
+```dotenv
+HOST_BRIDGE_HOST=127.0.0.1
+HOST_BRIDGE_PORT=7861
+HOST_BRIDGE_API_KEY=replace-with-a-long-random-value
+HOST_BRIDGE_DAEMON_URL=http://127.0.0.1:8000
+HOST_BRIDGE_CLAWBODY_HEALTH_URL=http://127.0.0.1:7860/health
+```
+
+Install the fixed current-user login task from the repository root. `install` creates or updates `PsyTwin ClawBody Host Bridge`; `status` queries it; `restart` ends that exact task instance and starts it again; `uninstall --yes` removes only that exact task.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+clawbody-host install
+clawbody-host status
+clawbody-host restart
+clawbody-host uninstall --yes
+```
+
+Normally run `install` once, then `restart` to start it immediately (otherwise it starts at the next login). Use `uninstall --yes` only when intentionally removing autostart. For foreground diagnosis, close any scheduled instance first and run `clawbody-host-bridge` in an activated terminal; do not run both copies together.
+
+Safe checks that do not start or move the robot:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:7861/health
+$hostBridgeKey = Read-Host "HOST_BRIDGE_API_KEY"
+Invoke-RestMethod http://127.0.0.1:7861/v1/device/discover -Headers @{"X-Host-Bridge-Key"=$hostBridgeKey}
+```
+
+The Host Bridge manages the Windows daemon at `127.0.0.1:8000`. The ClawBody Docker container reaches that same daemon at `host.docker.internal:8000`; port `7861` remains host-loopback-only and is not published to Docker. Device startup itself does not require a VPN and does not access Hugging Face, GitHub, OpenAI, or an application catalog. Online conversation still requires the configured Alibaba Cloud and Baidu services.
+
+Daily operation is: start Docker, open Sentinel, select **心宠调试**, then click **启动设备**. Keep Reachy Mini Control closed.
+
 ### Sentinel Internal Service (Recommended)
 
 The supported management UI is PsyTwin Sentinel. Start this project as a private device service; it does not expose a standalone web console:
@@ -119,7 +174,7 @@ All `/v1/*` requests require `X-Service-Key`. Transcripts and collaboration even
 
 Starting a hardware session returns immediately with `state: "starting"`. Reachy connection, camera, audio, and movement initialization continue in a background thread so `/health`, status polling, and the Sentinel UI remain responsive. The state changes to `running` when initialization finishes, or to `error` with a readable message when it fails.
 
-For local Reachy Mini Control playback, ClawBody adapts mono Baidu TTS output to the device's reported output-channel count, queues contiguous timestamped chunks without per-chunk scheduler gaps, and then waits for the full clip duration. This prevents live `appsrc` underruns and truncated playback. No extra setting is required; restart the internal service after updating the code.
+For local Reachy daemon playback, ClawBody adapts mono Baidu TTS output to the device's reported output-channel count, queues contiguous timestamped chunks without per-chunk scheduler gaps, and then waits for the full clip duration. This prevents live `appsrc` underruns and truncated playback. No extra setting is required; restart the internal service after updating the code.
 
 ### With Physical Robot (USB, diagnostics)
 
@@ -160,9 +215,9 @@ docker compose up -d --build
 ```
 
 Enter that person's own DashScope and Baidu credentials in `.env`; never commit
-this file or share it through Git. Start Reachy Mini Control first, connect the
-robot, and make sure it provides the Reachy daemon at `localhost:8000` before
-running the Docker command.
+this file or share it through Git. Keep Reachy Mini Control closed. The Windows
+Host Bridge starts the Reachy daemon at `127.0.0.1:8000` when Sentinel requests
+**启动设备**.
 
 Open this repository in Docker Desktop as a Compose project and click **Run**.
 The container starts the private `clawbody-service` process and connects to the
