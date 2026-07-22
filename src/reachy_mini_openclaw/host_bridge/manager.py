@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -629,7 +630,9 @@ class DaemonManager:
             return False
 
     async def _request_clawbody_health(self) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        hostname = urlsplit(self._clawbody_health_url).hostname
+        is_local = hostname in {"localhost", "127.0.0.1", "::1"}
+        async with httpx.AsyncClient(timeout=5.0, trust_env=not is_local) as client:
             return await client.get(self._clawbody_health_url)
 
     async def _request_sleep(self) -> None:

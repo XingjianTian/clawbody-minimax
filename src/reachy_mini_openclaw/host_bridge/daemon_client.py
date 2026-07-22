@@ -44,6 +44,10 @@ class ReachyDaemonClient:
             base_url=base_url.rstrip("/") + "/",
             timeout=timeout,
             transport=transport,
+            # The daemon is a machine-local service. On Windows, HTTPX can
+            # inherit an enabled system/VPN proxy and accidentally send
+            # 127.0.0.1 traffic through it, making startup depend on the VPN.
+            trust_env=False,
         )
 
     async def __aenter__(self) -> Self:

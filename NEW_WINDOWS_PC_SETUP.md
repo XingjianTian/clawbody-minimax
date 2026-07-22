@@ -81,7 +81,12 @@ docker compose version
 - 百度语音 API Key。
 - 百度语音 Secret Key。
 
-只启动机器人和调试动作时，不需要 VPN，也不需要云服务凭据。实时对话需要电脑能够访问阿里云和百度服务。
+只启动机器人和调试动作时，不需要 VPN，也不需要云服务凭据。最新版 Host Bridge 会让
+`127.0.0.1` / `localhost` 通信绕过 Windows 系统代理，因此即使 Clash、VPN 等软件在系统中留下了
+`127.0.0.1:7890` 之类的代理设置，也不会影响本机 Reachy daemon 启动。
+
+Reachy Mini SDK 在本机存在 Hugging Face 登录令牌时，可能尝试连接可选的远程 WebRTC 中央信令服务。
+该连接失败不会阻止本地 daemon、USB 控制和心宠调试启动。实时对话仍需要电脑能够访问阿里云和百度服务。
 
 ---
 
@@ -130,6 +135,9 @@ git log -1 --oneline
 
 - daemon 启动等待从 15 秒增加到 45 秒。
 - 关机等待休眠动作真正完成后再关闭 daemon。
+
+同时请确保拉取的是最新 `main`，其中还包含 Host Bridge 本地请求绕过 Windows/VPN 系统代理的修复。
+仅满足 `f965069` 并不代表已经包含这项后续修复。
 
 Sentinel 执行：
 
@@ -333,6 +341,30 @@ clawbody-host restart
 
 如果页面仍显示旧版的 `within 15 seconds`，重启一次 Windows。登录后计划任务会自动加载新代码。
 
+### 7.3 VPN 和 Windows 系统代理
+
+启动 Reachy Mini Lite 不需要打开 VPN，也不要求关闭 Windows 系统代理。最新版 Host Bridge 对以下本机地址强制直连：
+
+- `http://127.0.0.1:8000`：Reachy daemon。
+- 本机 `localhost`、`127.0.0.1` 或 `::1` 上的 ClawBody 健康检查地址。
+
+云端 API 请求不会被这一修复强制直连，仍会按照各服务自身配置和网络环境访问。
+
+如果关闭 VPN 后仍然出现 daemon 监听超时，请先确认更新后的 Python 进程已经加载：
+
+```powershell
+cd C:\PsyTwin\clawbody-minimax
+git switch main
+git pull origin main
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,mediapipe_vision]"
+clawbody-host install
+clawbody-host restart
+Invoke-RestMethod http://127.0.0.1:7861/health
+```
+
+最后一条命令应返回 `status: ok`。不要仅执行 `git pull` 后继续使用旧的计划任务进程。
+
 ---
 
 ## 8. 启动 ClawBody Docker 服务
@@ -502,6 +534,9 @@ START → CONNECT → HEALTHCHECK → APPS → Ready
 ```
 
 当前版本允许 daemon 最多使用 45 秒开始监听。正常实体机器通常需要约 20～30 秒。
+
+这里不需要打开 VPN。即使 Windows 系统代理仍处于启用状态，Host Bridge 与 daemon 之间的本机检查也会直接访问
+`127.0.0.1:8000`。
 
 启动时机器人可能执行唤醒动作，确保周围没有障碍物。
 
@@ -696,13 +731,27 @@ clawbody-host restart
 
 仍显示 15 秒时，重启 Windows。
 
-### 18.3 点击关机没有进入休眠
+### 18.3 不开 VPN 时提示 `did not begin listening within 45 seconds`
+
+最新版已经修复 Windows 系统代理错误接管 `127.0.0.1:8000` 请求的问题。典型旧版现象是日志已经出现：
+
+```text
+Daemon started successfully.
+Uvicorn running on http://0.0.0.0:8000
+```
+
+但 Sentinel 随后仍提示 daemon 在 45 秒内没有监听。这说明 daemon 本身已经启动，旧版 Host Bridge 的本机健康检查却走了
+VPN/Clash 代理并超时。
+
+按第 16.1 节重新拉取最新 `main`、执行可编辑安装并重启 Host Bridge。修复后不需要配置 `NO_PROXY`，也不需要为了启动设备打开 VPN。
+
+### 18.4 点击关机没有进入休眠
 
 旧版代码会在休眠动作完成前关闭 daemon。确认已拉取 `f965069` 或更新版本，并重新启动 Host Bridge。
 
 修复生效后，关机应持续约 5～8 秒，然后页面显示离线。
 
-### 18.4 找不到 USB/COM
+### 18.5 找不到 USB/COM
 
 检查：
 
@@ -713,7 +762,7 @@ clawbody-host restart
 - 是否有其他串口程序占用设备。
 - 更换 USB 口或数据线。
 
-### 18.5 Host Bridge 返回 401
+### 18.6 Host Bridge 返回 401
 
 确认：
 
@@ -725,7 +774,7 @@ Sentinel HOST_BRIDGE_API_KEY
 
 修改后重启 Host Bridge 和 Sentinel。
 
-### 18.6 Sentinel 显示设备命令来源无效
+### 18.7 Sentinel 显示设备命令来源无效
 
 使用正确地址访问：
 
@@ -735,7 +784,7 @@ http://localhost:3000
 
 修改 Sentinel `.env` 后必须重新启动 `npm run dev`。
 
-### 18.7 心宠调试正常，但无法开始对话
+### 18.8 心宠调试正常，但无法开始对话
 
 检查：
 
@@ -746,7 +795,7 @@ http://localhost:3000
 - 是否选择测试学生。
 - 设备是否为 Ready。
 
-### 18.8 ASR 没有文字
+### 18.9 ASR 没有文字
 
 检查百度语音凭据、麦克风设备、输入音量和 Docker 日志：
 
@@ -754,11 +803,11 @@ http://localhost:3000
 docker compose logs --tail 100 clawbody
 ```
 
-### 18.9 没有 TTS 声音
+### 18.10 没有 TTS 声音
 
 检查百度 TTS 权限、扬声器音量，并在心宠调试中点击“测试声音”。
 
-### 18.10 模型调用失败
+### 18.11 模型调用失败
 
 检查：
 

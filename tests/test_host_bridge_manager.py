@@ -1226,3 +1226,33 @@ async def test_clawbody_health_probe_has_five_second_wall_clock_deadline():
 
     assert reachable is False
     assert observed_timeouts == [5.0]
+
+
+@pytest.mark.parametrize(
+    ("health_url", "expected_trust_env"),
+    [
+        ("http://127.0.0.1:7860/health", False),
+        ("http://localhost:7860/health", False),
+        ("http://[::1]:7860/health", False),
+        ("https://clawbody.example.com/health", True),
+    ],
+)
+def test_clawbody_health_probe_bypasses_proxy_only_for_local_hosts(
+    health_url: str,
+    expected_trust_env: bool,
+):
+    async def run() -> None:
+        manager, _, _, _ = make_manager()
+        manager._clawbody_health_url = health_url
+
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.get.return_value = Mock(is_success=True)
+
+        with patch("reachy_mini_openclaw.host_bridge.manager.httpx.AsyncClient", return_value=client) as client_factory:
+            assert await manager._probe_clawbody_health() is True
+
+        client_factory.assert_called_once_with(timeout=5.0, trust_env=expected_trust_env)
+        client.get.assert_awaited_once_with(health_url)
+
+    asyncio.run(run())

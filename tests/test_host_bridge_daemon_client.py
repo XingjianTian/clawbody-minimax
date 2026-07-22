@@ -2,11 +2,19 @@ import asyncio
 import json
 import math
 import time
+from unittest.mock import patch
 
 import httpx
 
 from reachy_mini_openclaw.host_bridge.daemon_client import DaemonRequestError, ReachyDaemonClient
 from reachy_mini_openclaw.host_bridge.models import DeviceAction, PoseRequest, VolumeRequest
+
+
+def test_daemon_client_does_not_inherit_system_proxy_settings():
+    with patch("reachy_mini_openclaw.host_bridge.daemon_client.httpx.AsyncClient") as client_factory:
+        ReachyDaemonClient()
+
+    assert client_factory.call_args.kwargs["trust_env"] is False
 
 
 def test_wake_up_uses_reachy_move_endpoint():
