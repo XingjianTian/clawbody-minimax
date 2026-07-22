@@ -36,6 +36,8 @@ DAEMON_COMMAND = (
     "--log-level",
     "INFO",
 )
+DAEMON_LISTEN_TIMEOUT_SECONDS = 45.0
+SLEEP_MOVE_TIMEOUT_SECONDS = 8.0
 ACTIVE_PHASES = {
     DevicePhase.STARTING,
     DevicePhase.CONNECTING,
@@ -479,7 +481,10 @@ class DaemonManager:
                 self._logs.append("info", f"Started owned Reachy daemon PID {started_process.pid} on {serial_port}")
                 self._start_output_thread(started_process)
 
-                listening_status = await self._wait_for_daemon_listening(started_process, timeout=15.0)
+                listening_status = await self._wait_for_daemon_listening(
+                    started_process,
+                    timeout=DAEMON_LISTEN_TIMEOUT_SECONDS,
+                )
             else:
                 async with self._lock:
                     if self._status.operation_id != operation_id:
@@ -608,7 +613,7 @@ class DaemonManager:
             except Exception as error:
                 last_error = error
                 await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-        message = "Reachy daemon did not begin listening within 15 seconds"
+        message = f"Reachy daemon did not begin listening within {timeout:g} seconds"
         if last_error is not None:
             raise TimeoutError(message) from last_error
         raise TimeoutError(message)
@@ -629,7 +634,13 @@ class DaemonManager:
 
     async def _request_sleep(self) -> None:
         try:
-            await asyncio.wait_for(self._daemon_client.perform(DeviceAction.GOTO_SLEEP), timeout=3.0)
+            result = await asyncio.wait_for(self._daemon_client.perform(DeviceAction.GOTO_SLEEP), timeout=3.0)
+            move_uuid = result.get("uuid") if isinstance(result, dict) else None
+            if isinstance(move_uuid, str) and move_uuid:
+                await self._daemon_client.wait_until_move_finished(
+                    move_uuid,
+                    timeout=SLEEP_MOVE_TIMEOUT_SECONDS,
+                )
         except Exception as error:
             self._logs.append("warning", f"Reachy sleep request failed before daemon stop: {error}")
 

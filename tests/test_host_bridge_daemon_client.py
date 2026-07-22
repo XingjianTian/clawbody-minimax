@@ -315,6 +315,30 @@ def test_fixed_actions_use_only_their_daemon_endpoints():
     ]
 
 
+def test_wait_until_move_finished_polls_until_uuid_is_absent():
+    move_uuid = "00000000-0000-0000-0000-000000000001"
+    responses = [
+        [{"uuid": move_uuid}],
+        [{"uuid": move_uuid}],
+        [],
+    ]
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, json=responses.pop(0))
+
+    async def run() -> None:
+        client = ReachyDaemonClient(transport=httpx.MockTransport(handler))
+        try:
+            await client.wait_until_move_finished(move_uuid, timeout=1.0, poll_interval=0.001)
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+    assert requests == ["/api/move/running", "/api/move/running", "/api/move/running"]
+
+
 def test_antenna_test_centers_antennas_after_cancellation():
     payloads = []
     started_sleep = asyncio.Event()

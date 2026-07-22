@@ -227,6 +227,8 @@ async def test_start_uses_internal_command_and_reports_each_phase():
     client.wait_until_ready.side_effect = record_healthcheck_phase
     client.snapshot.side_effect = record_loading_phase
     manager, process_factory, _, child = make_manager(daemon_client=client)
+    wait_for_listening = AsyncMock(wraps=manager._wait_for_daemon_listening)
+    manager._wait_for_daemon_listening = wait_for_listening
 
     result = await manager.start(StartRequest(serial_port="COM5"))
     await wait_for_phase(manager, DevicePhase.READY)
@@ -249,11 +251,22 @@ async def test_start_uses_internal_command_and_reports_each_phase():
     assert kwargs["creationflags"] == (
         getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
+    wait_for_listening.assert_awaited_once_with(child, timeout=45.0)
     assert observed_phases == [DevicePhase.CONNECTING, DevicePhase.HEALTHCHECKING, DevicePhase.LOADING_APPS]
     final_status = await manager.status()
     assert final_status.daemon_owned is True
     assert final_status.daemon_pid == child.pid
     assert final_status.serial_port == "COM5"
+
+
+@async_test
+async def test_daemon_listen_timeout_reports_configured_duration():
+    daemon_client = daemon_client_ready()
+    daemon_client.status.side_effect = ConnectionError("daemon is not listening")
+    manager, _, _, child = make_manager(daemon_client=daemon_client)
+
+    with pytest.raises(TimeoutError, match=r"within 0\.01 seconds"):
+        await manager._wait_for_daemon_listening(child, timeout=0.01)
 
 
 @async_test
@@ -552,6 +565,10 @@ async def test_stop_sleeps_then_terminates_only_the_recorded_process():
     result = await manager.stop()
 
     daemon_client.perform.assert_awaited_with(DeviceAction.GOTO_SLEEP)
+    daemon_client.wait_until_move_finished.assert_awaited_once_with(
+        "00000000-0000-0000-0000-000000000001",
+        timeout=8.0,
+    )
     assert child.terminate_calls == 1
     assert child.kill_calls == 0
     assert result.phase == DevicePhase.OFFLINE
@@ -694,15 +711,21 @@ async def test_stop_during_connecting_requests_sleep_before_terminate():
         events.append("sleep")
         return {"uuid": "00000000-0000-0000-0000-000000000001"}
 
+    async def wait_for_sleep(move_uuid: str, *, timeout: float) -> None:
+        assert move_uuid == "00000000-0000-0000-0000-000000000001"
+        assert timeout == 8.0
+        events.append("wait_sleep")
+
     daemon_client.status.side_effect = block_while_connecting
     daemon_client.perform.side_effect = record_action
+    daemon_client.wait_until_move_finished.side_effect = wait_for_sleep
     manager, _, _, _ = make_manager(process=child, daemon_client=daemon_client)
 
     await manager.start(StartRequest())
     await connecting.wait()
     result = await manager.stop()
 
-    assert events == ["sleep", "terminate"]
+    assert events == ["sleep", "wait_sleep", "terminate"]
     assert result.phase == DevicePhase.OFFLINE
     assert result.daemon_owned is False
 

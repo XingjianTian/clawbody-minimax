@@ -142,6 +142,34 @@ class ReachyDaemonClient:
             return await self._center_antennas()
         raise ValueError(f"Unsupported device action: {action}")
 
+    async def wait_until_move_finished(
+        self,
+        move_uuid: str,
+        *,
+        timeout: float = 8.0,
+        poll_interval: float = 0.1,
+    ) -> None:
+        """Wait until a daemon move UUID is no longer listed as running."""
+        if not move_uuid:
+            raise ValueError("move_uuid must not be empty")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+
+        deadline = time.monotonic() + timeout
+        while True:
+            running_moves = await self._get_value("/api/move/running")
+            if not isinstance(running_moves, list):
+                raise ValueError("Reachy daemon returned an invalid running-moves payload")
+            if not any(isinstance(move, dict) and str(move.get("uuid")) == move_uuid for move in running_moves):
+                return
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Reachy move {move_uuid} did not finish before the timeout")
+            await asyncio.sleep(min(poll_interval, remaining))
+
     async def set_pose(self, pose: PoseRequest) -> dict[str, Any]:
         """Move to a pose expressed by the host bridge's typed degree fields."""
         return await self._post_object("/api/move/goto", json=self._pose_payload(pose))
