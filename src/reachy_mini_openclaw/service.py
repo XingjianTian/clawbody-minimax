@@ -8,8 +8,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from reachy_mini_openclaw.two_layer_demo import EventStore, ProfessionalResponder, TwoLayerDemoOrchestrator, detect_negative_emotion
-
+from reachy_mini_openclaw.two_layer_demo import (
+    EventStore,
+    ProfessionalResponder,
+    TwoLayerDemoOrchestrator,
+    detect_negative_emotion,
+)
 
 RISK_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 

@@ -1,6 +1,6 @@
-from fastapi.testclient import TestClient
-
 import inspect
+
+from fastapi.testclient import TestClient
 
 from reachy_mini_openclaw.service_api import app, main
 
