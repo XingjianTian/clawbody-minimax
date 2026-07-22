@@ -392,32 +392,36 @@ def test_main_rejects_invalid_or_out_of_range_port(
 
 
 def test_main_runs_uvicorn_on_configured_loopback_port(monkeypatch: pytest.MonkeyPatch):
-    calls: list[tuple[object, str, int]] = []
+    calls: list[tuple[object, str, int, bool]] = []
 
-    def run(application: object, *, host: str, port: int) -> None:
-        calls.append((application, host, port))
+    def run(application: object, *, host: str, port: int, use_colors: bool) -> None:
+        calls.append((application, host, port, use_colors))
 
     monkeypatch.setenv("HOST_BRIDGE_API_KEY", API_KEY)
     monkeypatch.setenv("HOST_BRIDGE_HOST", "127.0.0.1")
     monkeypatch.setenv("HOST_BRIDGE_PORT", "8791")
     monkeypatch.setattr(host_bridge_api.uvicorn, "run", run)
     host_bridge_api.main()
-    assert calls == [(host_bridge_api.app, "127.0.0.1", 8791)]
+    assert calls == [(host_bridge_api.app, "127.0.0.1", 8791, False)]
 
 
 def test_main_loads_api_key_from_working_directory_dotenv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    calls: list[tuple[object, str, int]] = []
+    calls: list[tuple[object, str, int, bool]] = []
     (tmp_path / ".env").write_text("HOST_BRIDGE_API_KEY=dotenv-host-bridge-key\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HOST_BRIDGE_API_KEY", raising=False)
-    monkeypatch.setattr(host_bridge_api.uvicorn, "run", lambda app, *, host, port: calls.append((app, host, port)))
+    monkeypatch.setattr(
+        host_bridge_api.uvicorn,
+        "run",
+        lambda app, *, host, port, use_colors: calls.append((app, host, port, use_colors)),
+    )
 
     host_bridge_api.main()
 
-    assert calls == [(host_bridge_api.app, "127.0.0.1", 7861)]
+    assert calls == [(host_bridge_api.app, "127.0.0.1", 7861, False)]
     assert host_bridge_api.os.environ["HOST_BRIDGE_API_KEY"] == "dotenv-host-bridge-key"
 
 

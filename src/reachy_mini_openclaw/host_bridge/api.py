@@ -228,7 +228,10 @@ def main() -> None:
         raise RuntimeError("HOST_BRIDGE_PORT must be an integer") from error
     if not 1 <= port <= 65535:
         raise RuntimeError("HOST_BRIDGE_PORT must be between 1 and 65535")
-    uvicorn.run(app, host=host, port=port)
+    # Windows Task Scheduler launches this module through pythonw.exe, where
+    # stdout/stderr are None. Disable Uvicorn's TTY-based color detection so
+    # its logging formatter can initialize without a console.
+    uvicorn.run(app, host=host, port=port, use_colors=False)
 
 
 if __name__ == "__main__":
