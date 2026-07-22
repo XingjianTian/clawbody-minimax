@@ -4,6 +4,8 @@
 
 ClawBody combines an OpenAI-compatible LLM with Reachy Mini's expressive robot body, using Baidu ASR/TTS for Chinese/English voice conversation. The current PsyTwin deployment uses Alibaba Cloud DashScope/Qwen while retaining legacy `MINIMAX_*` environment variable names for compatibility.
 
+> 在新的 Windows 电脑上配置 Sentinel、Docker、Host Bridge 和 Reachy Mini Lite，请按照[《新 Windows 电脑配置心宠调试与 Reachy Mini 实时联调》](./NEW_WINDOWS_PC_SETUP.md)逐步操作。
+
 > 🦞 This is a fork of [tomrikert/clawbody](https://github.com/tomrikert/clawbody) with MiniMax LLM + Baidu ASR/TTS replacing OpenAI Realtime API.
 
 ## ✨ Features
