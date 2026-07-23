@@ -17,6 +17,7 @@ import httpx
 from .daemon_client import ReachyDaemonClient
 from .log_store import LogLevel, LogStore
 from .models import (
+    ChoreographyRequest,
     DeviceAction,
     DeviceError,
     DevicePhase,
@@ -285,6 +286,11 @@ class DaemonManager:
         await self._daemon_client.perform(action)
         return await self.status()
 
+    async def play_choreography(self, request: ChoreographyRequest) -> DeviceStatus:
+        """Play one allow-listed expression or dance from a fixed dataset."""
+        await self._daemon_client.play_choreography(request)
+        return await self.status()
+
     async def set_pose(self, pose: PoseRequest) -> DeviceStatus:
         """Forward a validated pose to the local Reachy daemon."""
         await self._daemon_client.set_pose(pose)
@@ -323,6 +329,16 @@ class DaemonManager:
 
         try:
             daemon_status = await self._daemon_client.status()
+            state = _string_value(daemon_status.get("state"))
+            snapshot: dict[str, Any] | None = None
+            if state is not None and state.lower() in {"running", "ready"}:
+                try:
+                    snapshot = await self._daemon_client.snapshot()
+                except Exception as error:
+                    self._logs.append(
+                        "warning",
+                        f"External Reachy daemon snapshot refresh failed: {error}",
+                    )
         except Exception:
             async with self._lock:
                 if not self._status_probe_is_current(
@@ -344,6 +360,11 @@ class DaemonManager:
                 observed_phase,
             ):
                 return self._copy_status()
+            if snapshot is not None:
+                live_daemon_status = snapshot.get("daemon_status")
+                if isinstance(live_daemon_status, dict):
+                    daemon_status = live_daemon_status
+                self._apply_snapshot(snapshot)
             state = _string_value(daemon_status.get("state"))
             version = _string_value(daemon_status.get("version"))
             if state is not None:

@@ -12,6 +12,8 @@ from reachy_mini_openclaw.host_bridge import api as host_bridge_api
 from reachy_mini_openclaw.host_bridge.daemon_client import DaemonRequestError, ReachyDaemonClient
 from reachy_mini_openclaw.host_bridge.manager import DaemonManager
 from reachy_mini_openclaw.host_bridge.models import (
+    ChoreographyKind,
+    ChoreographyRequest,
     DeviceAction,
     DeviceError,
     DevicePhase,
@@ -64,6 +66,10 @@ class FakeManager:
             raise self.failure
         return DeviceStatus(phase=DevicePhase.READY)
 
+    async def play_choreography(self, request: ChoreographyRequest) -> DeviceStatus:
+        self.calls.append(("play_choreography", request))
+        return DeviceStatus(phase=DevicePhase.READY)
+
     async def set_pose(self, request: PoseRequest) -> DeviceStatus:
         self.calls.append(("set_pose", request))
         return DeviceStatus(phase=DevicePhase.READY)
@@ -104,6 +110,7 @@ def test_health_is_public(client: TestClient):
         ("POST", "/v1/device/stop", None),
         ("POST", "/v1/device/restart", {}),
         ("POST", "/v1/device/action", {"action": "wake_up"}),
+        ("POST", "/v1/device/choreography", {"kind": "emotion", "move": "loving1"}),
         ("POST", "/v1/device/pose", {}),
         ("POST", "/v1/device/volume", {"target": "speaker", "volume": 50}),
         ("GET", "/v1/device/logs?after=0", None),
@@ -173,6 +180,11 @@ def test_routes_forward_only_typed_requests(client: TestClient, manager: FakeMan
         json={"action": "center"},
     ).status_code == 200
     assert client.post(
+        "/v1/device/choreography",
+        headers=AUTH_HEADERS,
+        json={"kind": "emotion", "move": "loving1"},
+    ).status_code == 200
+    assert client.post(
         "/v1/device/pose",
         headers=AUTH_HEADERS,
         json={"head_yaw": 12, "duration": 1.5},
@@ -189,6 +201,9 @@ def test_routes_forward_only_typed_requests(client: TestClient, manager: FakeMan
     assert isinstance(calls["restart"], StartRequest)
     assert calls["restart"].serial_port == "COM8"
     assert calls["perform"] is DeviceAction.CENTER
+    assert isinstance(calls["play_choreography"], ChoreographyRequest)
+    assert calls["play_choreography"].kind is ChoreographyKind.EMOTION
+    assert calls["play_choreography"].move == "loving1"
     assert isinstance(calls["set_pose"], PoseRequest)
     assert calls["set_pose"].head_yaw == 12
     assert isinstance(calls["set_volume"], VolumeRequest)
@@ -200,6 +215,8 @@ def test_routes_forward_only_typed_requests(client: TestClient, manager: FakeMan
     [
         ("/v1/device/start", {"serial_port": "C:/robot.exe"}),
         ("/v1/device/action", {"action": "run_command"}),
+        ("/v1/device/choreography", {"kind": "emotion", "move": "../../wake_up"}),
+        ("/v1/device/choreography", {"kind": "music", "move": "loving1"}),
         ("/v1/device/pose", {"head_yaw": 66}),
         ("/v1/device/volume", {"target": "speaker", "volume": 101}),
     ],
@@ -220,6 +237,7 @@ def test_typed_request_validation_rejects_invalid_values(
         ("/v1/device/stop", {"command": "taskkill /f"}),
         ("/v1/device/restart", {"shell": "powershell.exe"}),
         ("/v1/device/action", {"action": "wake_up", "command": "whoami"}),
+        ("/v1/device/choreography", {"kind": "emotion", "move": "loving1", "path": "C:/robot.exe"}),
         ("/v1/device/pose", {"head_yaw": 0, "path": "C:/robot.exe"}),
         ("/v1/device/volume", {"target": "speaker", "volume": 50, "shell": "cmd.exe"}),
     ],

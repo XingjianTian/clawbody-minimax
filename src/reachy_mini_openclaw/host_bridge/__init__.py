@@ -3,6 +3,8 @@
 from .log_store import LogStore
 from .models import (
     ActionRequest,
+    ChoreographyKind,
+    ChoreographyRequest,
     DeviceAction,
     DeviceError,
     DevicePhase,
@@ -17,6 +19,8 @@ from .models import (
 
 __all__ = [
     "ActionRequest",
+    "ChoreographyKind",
+    "ChoreographyRequest",
     "DeviceAction",
     "DeviceError",
     "DevicePhase",

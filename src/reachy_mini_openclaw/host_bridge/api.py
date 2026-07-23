@@ -21,6 +21,7 @@ from .log_store import REDACTIONS
 from .manager import DaemonManager
 from .models import (
     ActionRequest,
+    ChoreographyRequest,
     DeviceStatus,
     PoseRequest,
     SerialDevice,
@@ -39,6 +40,10 @@ class _StrictStartRequest(StartRequest):
 
 
 class _StrictActionRequest(ActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _StrictChoreographyRequest(ChoreographyRequest):
     model_config = ConfigDict(extra="forbid")
 
 
@@ -173,6 +178,10 @@ def create_app(manager: DaemonManager) -> FastAPI:
     @router.post("/action", response_model=DeviceStatus)
     async def action(request: _StrictActionRequest) -> DeviceStatus:
         return await _run_status_operation(manager.perform(request.action))
+
+    @router.post("/choreography", response_model=DeviceStatus)
+    async def choreography(request: _StrictChoreographyRequest) -> DeviceStatus:
+        return await _run_status_operation(manager.play_choreography(request))
 
     @router.post("/pose", response_model=DeviceStatus)
     async def pose(request: _StrictPoseRequest) -> DeviceStatus:

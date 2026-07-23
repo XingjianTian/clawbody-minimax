@@ -2,12 +2,17 @@ import asyncio
 import json
 import math
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 
-from reachy_mini_openclaw.host_bridge.daemon_client import DaemonRequestError, ReachyDaemonClient
-from reachy_mini_openclaw.host_bridge.models import DeviceAction, PoseRequest, VolumeRequest
+from reachy_mini_openclaw.host_bridge.daemon_client import (
+    DaemonRequestError,
+    ReachyDaemonClient,
+    _choreography_audio_path,
+)
+from reachy_mini_openclaw.host_bridge.models import ChoreographyRequest, DeviceAction, PoseRequest, VolumeRequest
 
 
 def test_daemon_client_does_not_inherit_system_proxy_settings():
@@ -33,6 +38,58 @@ def test_wake_up_uses_reachy_move_endpoint():
 
     asyncio.run(run())
     assert requests == [("POST", "/api/move/play/wake_up")]
+
+
+def test_choreography_uses_the_fixed_dataset_endpoint():
+    requests = []
+
+    async def run() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request.method, request.url.path, json.loads(request.content or b"{}")))
+            return httpx.Response(200, json={"uuid": "00000000-0000-0000-0000-000000000001"})
+
+        client = ReachyDaemonClient(
+            transport=httpx.MockTransport(handler),
+            choreography_audio_resolver=lambda request: (
+                "C:/cached-emotions/loving1.ogg" if request.kind.value == "emotion" else None
+            ),
+        )
+        try:
+            await client.play_choreography(ChoreographyRequest(kind="emotion", move="loving1"))
+            await client.play_choreography(ChoreographyRequest(kind="music", move="paint-it-black"))
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+    assert requests == [
+        (
+            "POST",
+            "/api/move/play/recorded-move-dataset/pollen-robotics/reachy-mini-emotions-library/loving1",
+            {},
+        ),
+        ("POST", "/api/media/play_sound", {"file": "C:/cached-emotions/loving1.ogg"}),
+        ("POST", "/api/move/play/recorded-move-dataset/Anne-Charlotte/music/paint-it-black", {}),
+    ]
+
+
+def test_current_emotion_ogg_is_resolved_from_the_fixed_local_dataset(tmp_path: Path):
+    sound = tmp_path / "loving1.ogg"
+    sound.write_bytes(b"OggS")
+    _choreography_audio_path.cache_clear()
+
+    with patch(
+        "reachy_mini_openclaw.host_bridge.daemon_client.snapshot_download",
+        return_value=str(tmp_path),
+    ) as download:
+        resolved = _choreography_audio_path(ChoreographyRequest(kind="emotion", move="loving1").kind, "loving1")
+
+    assert resolved == str(sound.resolve())
+    download.assert_called_once_with(
+        "pollen-robotics/reachy-mini-emotions-library",
+        repo_type="dataset",
+        local_files_only=True,
+    )
+    _choreography_audio_path.cache_clear()
 
 
 def test_snapshot_degrades_camera_without_losing_motor_state():

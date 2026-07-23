@@ -6,19 +6,49 @@ import asyncio
 import json
 import math
 import time
+from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal, Self, cast
 
 import httpx
+from huggingface_hub import snapshot_download
 
 from .log_store import REDACTIONS
-from .models import DeviceAction, MediaStatus, PoseRequest, VolumeRequest
+from .models import ChoreographyKind, ChoreographyRequest, DeviceAction, MediaStatus, PoseRequest, VolumeRequest
 
 ACTION_PATHS = {
     DeviceAction.WAKE_UP: "/api/move/play/wake_up",
     DeviceAction.GOTO_SLEEP: "/api/move/play/goto_sleep",
     DeviceAction.TEST_SOUND: "/api/volume/test-sound",
 }
+
+CHOREOGRAPHY_DATASETS = {
+    ChoreographyKind.EMOTION: "pollen-robotics/reachy-mini-emotions-library",
+    ChoreographyKind.DANCE: "pollen-robotics/reachy-mini-dances-library",
+    ChoreographyKind.MUSIC: "Anne-Charlotte/music",
+}
 _MediaComponentState = Literal["ready", "unavailable", "unknown"]
+ChoreographyAudioResolver = Callable[[ChoreographyRequest], str | None]
+
+
+@lru_cache(maxsize=128)
+def _choreography_audio_path(kind: ChoreographyKind, move: str) -> str | None:
+    """Resolve current dataset audio that the 1.8 daemon does not recognize."""
+    if kind is not ChoreographyKind.EMOTION:
+        return None
+    dataset = CHOREOGRAPHY_DATASETS[kind]
+    local_path = Path(
+        snapshot_download(dataset, repo_type="dataset", local_files_only=True)
+    ).resolve()
+    sound_path = (local_path / f"{move}.ogg").resolve()
+    if sound_path.parent != local_path or not sound_path.is_file():
+        return None
+    return str(sound_path)
+
+
+def _default_choreography_audio_resolver(request: ChoreographyRequest) -> str | None:
+    return _choreography_audio_path(request.kind, request.move)
 
 
 class DaemonRequestError(RuntimeError):
@@ -39,7 +69,9 @@ class ReachyDaemonClient:
         timeout: float = 5.0,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        choreography_audio_resolver: ChoreographyAudioResolver = _default_choreography_audio_resolver,
     ) -> None:
+        self._choreography_audio_resolver = choreography_audio_resolver
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/") + "/",
             timeout=timeout,
@@ -145,6 +177,17 @@ class ReachyDaemonClient:
                 raise
             return await self._center_antennas()
         raise ValueError(f"Unsupported device action: {action}")
+
+    async def play_choreography(self, request: ChoreographyRequest) -> dict[str, Any]:
+        """Play an allow-listed recorded move from its fixed daemon dataset."""
+        dataset = CHOREOGRAPHY_DATASETS[request.kind]
+        result = await self._post_object(
+            f"/api/move/play/recorded-move-dataset/{dataset}/{request.move}"
+        )
+        sound_path = self._choreography_audio_resolver(request)
+        if sound_path is not None:
+            await self._post_object("/api/media/play_sound", json={"file": sound_path})
+        return result
 
     async def wait_until_move_finished(
         self,

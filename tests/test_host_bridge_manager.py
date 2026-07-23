@@ -314,6 +314,34 @@ async def test_stop_never_terminates_reused_external_daemon():
 
 
 @async_test
+async def test_external_ready_daemon_restores_motor_and_media_snapshot():
+    manager, process_factory, daemon_client, _ = make_manager()
+    daemon_client.status.side_effect = None
+    daemon_client.status.return_value = {"state": "running", "version": "1.8.0"}
+    daemon_client.snapshot.return_value = daemon_snapshot(
+        motor_mode="enabled",
+        media=MediaStatus(
+            camera="ready",
+            microphone="ready",
+            speaker="ready",
+            input_volume=35,
+            output_volume=70,
+        ),
+    )
+
+    status = await manager.status()
+
+    assert status.phase == DevicePhase.READY
+    assert status.daemon_owned is False
+    assert status.motor_mode == "enabled"
+    assert status.media.camera == "ready"
+    assert status.media.input_volume == 35
+    assert status.media.output_volume == 70
+    daemon_client.snapshot.assert_awaited_once_with()
+    process_factory.assert_not_called()
+
+
+@async_test
 async def test_stop_during_external_readiness_reports_not_owned_without_cancelling():
     readiness_started = asyncio.Event()
     release_readiness = asyncio.Event()
